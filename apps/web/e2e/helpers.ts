@@ -3,7 +3,7 @@ import { expect, type Page } from "@playwright/test";
 export const PASSWORD = "e2e-password-123";
 
 export function uniqueEmail(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e4)}@e2e.test`;
+  return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e4)}@example.com`;
 }
 
 export async function signup(page: Page, organization: string, email = uniqueEmail("ceo")): Promise<string> {

@@ -4,9 +4,9 @@ import { StatusBadge } from "@/components/ui/badge";
 import { cn } from "@/lib/format";
 import type { Agent, Task } from "@/lib/types";
 
-const NODE_WIDTH = 228;
+const NODE_WIDTH = 196;
 const NODE_HEIGHT = 84;
-const COLUMN_GAP = 64;
+const COLUMN_GAP = 36;
 const ROW_GAP = 20;
 
 const EDGE_COLORS: Record<string, string> = {

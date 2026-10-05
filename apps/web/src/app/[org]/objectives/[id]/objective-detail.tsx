@@ -164,7 +164,7 @@ export function ObjectiveDetail() {
               <EmptyState title={objective.status === "PLANNING" ? "Chief of Staff is planning…" : "No plan yet"} />
             </Card>
           ) : (
-            <div className="grid gap-6 xl:grid-cols-[1fr_360px]">
+            <div className="grid gap-6 2xl:grid-cols-[1fr_380px]">
               <Card className="min-w-0 p-5">
                 <TaskGraph tasks={tasks} agents={agents.byId} selectedId={selected?.id} onSelect={(task) => setSelectedId(task.id)} />
               </Card>

@@ -190,7 +190,7 @@ export default function HeadquartersPage() {
                     <div>
                       <p className="text-sm font-medium">{department.name}</p>
                       <p className="text-xs text-muted">
-                        {department.agent_count} agents · {department.active_tasks} active
+                        {department.agent_count} {department.agent_count === 1 ? "agent" : "agents"} · {department.active_tasks} active
                       </p>
                     </div>
                     <StatusBadge status={department.status ?? "idle"} />
@@ -209,7 +209,7 @@ export default function HeadquartersPage() {
               }
             />
             <div className="border-t border-border">
-              <ActivityFeed events={data.activity} compact />
+              <ActivityFeed events={data.activity.slice(0, 8)} compact />
             </div>
           </Card>
         </div>

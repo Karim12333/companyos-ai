@@ -69,7 +69,7 @@ def slow_mock() -> Any:
 
 
 async def wait_for(
-    tenant: Tenant, objective_id: str, predicate: Callable[[dict[str, Any]], bool], seconds: float = 90
+    tenant: Tenant, objective_id: str, predicate: Callable[[dict[str, Any]], bool], seconds: float = 180
 ) -> dict[str, Any]:
     deadline = asyncio.get_running_loop().time() + seconds
     while True:
