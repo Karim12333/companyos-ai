@@ -275,6 +275,29 @@ class ApprovalOut(ORM):
     created_at: datetime
 
 
+class EscalationOut(ORM):
+    id: uuid.UUID
+    objective_id: uuid.UUID | None
+    task_id: uuid.UUID | None
+    agent_id: uuid.UUID | None
+    approval_id: uuid.UUID | None
+    kind: str
+    question: str
+    context: str
+    options: list[dict[str, Any]]
+    status: str
+    resolution_option: str | None
+    resolution_note: str
+    resolved_at: datetime | None
+    applied_at: datetime | None
+    created_at: datetime
+
+
+class EscalationDecision(BaseModel):
+    option: str = Field(min_length=1, max_length=64)
+    note: str = Field(default="", max_length=4000)
+
+
 class ApprovalDecision(BaseModel):
     approve: bool
     note: str = Field(default="", max_length=2000)

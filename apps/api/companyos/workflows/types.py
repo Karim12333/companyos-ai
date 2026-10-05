@@ -30,12 +30,34 @@ class ExecuteResult:
     status: str
     approval_ids: list[str] = field(default_factory=list)
     requires_review: bool = True
+    escalation_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ReviewResult:
     verdict: str
     feedback: str = ""
+    escalation_id: str | None = None
+
+
+@dataclass
+class EscalationCheck:
+    organization_id: str
+    escalation_ids: list[str]
+
+
+@dataclass
+class EscalationRef:
+    organization_id: str
+    objective_id: str
+    task_id: str
+    escalation_id: str
+
+
+@dataclass
+class EscalationOutcome:
+    # rerun: execute the task again; done: task finished; stopped: task failed or was cancelled
+    action: str
 
 
 @dataclass

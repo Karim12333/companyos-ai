@@ -9,6 +9,9 @@ from temporalio.exceptions import ActivityError
 with workflow.unsafe.imports_passed_through():
     from companyos.workflows.types import (
         ApprovalCheck,
+        EscalationCheck,
+        EscalationOutcome,
+        EscalationRef,
         ExecuteResult,
         FinalizeInput,
         ObjectiveInput,
@@ -21,6 +24,8 @@ with workflow.unsafe.imports_passed_through():
 SHORT = timedelta(minutes=2)
 AGENT_RUN = timedelta(minutes=20)
 APPROVAL_POLL = timedelta(minutes=10)
+# Safety cap on execute/review rounds for one task; CEO-guided rounds are included
+MAX_TASK_ROUNDS = 25
 DB_RETRY = RetryPolicy(maximum_attempts=5, initial_interval=timedelta(seconds=2))
 AGENT_RETRY = RetryPolicy(
     maximum_attempts=3,
@@ -39,12 +44,17 @@ class ObjectiveWorkflow:
         self._cancelled = False
         self._wake = False
         self._decided: set[str] = set()
+        self._resolved_escalations: set[str] = set()
         self._running: dict[str, asyncio.Task[None]] = {}
         self._stage = "starting"
 
     @workflow.signal
     def approval_decided(self, approval_id: str) -> None:
         self._decided.add(approval_id)
+
+    @workflow.signal
+    def escalation_resolved(self, escalation_id: str) -> None:
+        self._resolved_escalations.add(escalation_id)
 
     @workflow.signal
     def pause(self) -> None:
@@ -118,45 +128,112 @@ class ObjectiveWorkflow:
         return await self._finalize(objective, cancelled=self._cancelled)
 
     async def _run_task(self, ref: TaskRef, max_review_rounds: int) -> None:
+        """Explicit task state machine; every exit leaves the task in a visible state."""
+        mode = "execute"
         try:
-            for _ in range(max_review_rounds + 1):
-                result: ExecuteResult = await workflow.execute_activity(
-                    "execute_task",
-                    ref,
-                    result_type=ExecuteResult,
-                    start_to_close_timeout=AGENT_RUN,
-                    retry_policy=AGENT_RETRY,
-                )
-                if result.status == "failed":
+            for _ in range(MAX_TASK_ROUNDS):
+                if self._cancelled:
                     return
-                if result.approval_ids:
-                    await self._await_approvals(ref, result.approval_ids)
-                    if self._cancelled:
+                if mode == "execute":
+                    result: ExecuteResult = await workflow.execute_activity(
+                        "execute_task",
+                        ref,
+                        result_type=ExecuteResult,
+                        start_to_close_timeout=AGENT_RUN,
+                        retry_policy=AGENT_RETRY,
+                    )
+                    if result.status in ("failed", "skipped"):
                         return
-                    await workflow.execute_activity(
-                        "resolve_task_approvals", ref, start_to_close_timeout=SHORT, retry_policy=DB_RETRY
+                    if (
+                        result.status == "completed"
+                        and not result.requires_review
+                        and not result.approval_ids
+                    ):
+                        await self._complete(ref)
+                        return
+                    if result.approval_ids:
+                        await self._await_approvals(ref, result.approval_ids)
+                        if self._cancelled:
+                            return
+                        await workflow.execute_activity(
+                            "resolve_task_approvals", ref, start_to_close_timeout=SHORT, retry_policy=DB_RETRY
+                        )
+                    if result.escalation_ids:
+                        mode = await self._await_escalations(ref, result.escalation_ids)
+                        continue
+                    if not result.requires_review:
+                        await self._complete(ref)
+                        return
+                    mode = "review"
+                elif mode == "review":
+                    review: ReviewResult = await workflow.execute_activity(
+                        "review_task",
+                        ref,
+                        result_type=ReviewResult,
+                        start_to_close_timeout=AGENT_RUN,
+                        retry_policy=AGENT_RETRY,
                     )
-                if not result.requires_review:
-                    await workflow.execute_activity(
-                        "complete_task", ref, start_to_close_timeout=SHORT, retry_policy=DB_RETRY
-                    )
+                    if review.verdict == "accept":
+                        return
+                    if review.verdict == "escalated" and review.escalation_id:
+                        mode = await self._await_escalations(ref, [review.escalation_id])
+                        continue
+                    mode = "execute"
+                else:
                     return
-                review: ReviewResult = await workflow.execute_activity(
-                    "review_task",
-                    ref,
-                    result_type=ReviewResult,
-                    start_to_close_timeout=AGENT_RUN,
-                    retry_policy=AGENT_RETRY,
-                )
-                if review.verdict == "accept":
-                    return
+            # Never fall out silently: the safety cap is a visible failure
+            await self._mark_failed(ref, f"Task exceeded {MAX_TASK_ROUNDS} execution rounds")
         except ActivityError as error:
-            await workflow.execute_activity(
-                "mark_task_failed",
-                TaskFailure(ref.organization_id, ref.objective_id, ref.task_id, str(error.cause or error)),
+            await self._mark_failed(ref, str(error.cause or error))
+
+    async def _complete(self, ref: TaskRef) -> None:
+        await workflow.execute_activity(
+            "complete_task", ref, start_to_close_timeout=SHORT, retry_policy=DB_RETRY
+        )
+
+    async def _mark_failed(self, ref: TaskRef, message: str) -> None:
+        await workflow.execute_activity(
+            "mark_task_failed",
+            TaskFailure(ref.organization_id, ref.objective_id, ref.task_id, message),
+            start_to_close_timeout=SHORT,
+            retry_policy=DB_RETRY,
+        )
+
+    async def _await_escalations(self, ref: TaskRef, escalation_ids: list[str]) -> str:
+        """Waits for the CEO and returns the next mode: execute, done or stop."""
+        while not self._cancelled and not all(item in self._resolved_escalations for item in escalation_ids):
+            try:
+                await workflow.wait_condition(
+                    lambda: (
+                        self._cancelled or all(item in self._resolved_escalations for item in escalation_ids)
+                    ),
+                    timeout=APPROVAL_POLL,
+                )
+            except TimeoutError:
+                resolved: list[str] = await workflow.execute_activity(
+                    "resolved_escalations",
+                    EscalationCheck(ref.organization_id, escalation_ids),
+                    result_type=list[str],
+                    start_to_close_timeout=SHORT,
+                    retry_policy=DB_RETRY,
+                )
+                self._resolved_escalations.update(resolved)
+        if self._cancelled:
+            return "stop"
+        next_mode = "done"
+        for escalation_id in escalation_ids:
+            outcome: EscalationOutcome = await workflow.execute_activity(
+                "apply_escalation_resolution",
+                EscalationRef(ref.organization_id, ref.objective_id, ref.task_id, escalation_id),
+                result_type=EscalationOutcome,
                 start_to_close_timeout=SHORT,
                 retry_policy=DB_RETRY,
             )
+            if outcome.action == "stopped":
+                return "stop"
+            if outcome.action == "rerun":
+                next_mode = "execute"
+        return next_mode
 
     async def _await_approvals(self, ref: TaskRef, approval_ids: list[str]) -> None:
         await workflow.execute_activity(

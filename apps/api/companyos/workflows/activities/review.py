@@ -17,11 +17,13 @@ from companyos.models import (
 )
 from companyos.models.enums import (
     ActorType,
+    EscalationKind,
     MessageKind,
     ReviewStatus,
     TaskStatus,
 )
 from companyos.services import artifacts as artifact_service
+from companyos.services.escalations import REVIEW_EXHAUSTED_OPTIONS, create_escalation
 from companyos.services.integrations import resolve_ai
 from companyos.services.usage import record_usage
 from companyos.workflows.activities.shared import (
@@ -132,11 +134,33 @@ async def review_task(ref: TaskRef) -> ReviewResult:
             )
             return ReviewResult(verdict="revise", feedback=verdict.feedback)
 
-        task.execution_metadata = {
-            **task.execution_metadata,
-            "review_score": verdict.score,
-            **({"accepted_after_max_revisions": True} if wants_revision else {}),
-        }
+        if wants_revision:
+            # Revision budget spent and the reviewer still rejects: the CEO decides, nothing is auto-accepted
+            task.review_feedback = verdict.feedback
+            task.execution_metadata = {**task.execution_metadata, "review_score": verdict.score}
+            await session.execute(
+                update(Artifact)
+                .where(Artifact.task_id == task.id)
+                .values(review_status=ReviewStatus.CHANGES_REQUESTED)
+            )
+            issues = "\n".join(f"- {issue}" for issue in verdict.issues)
+            escalation = await create_escalation(
+                session,
+                task=task,
+                kind=EscalationKind.REVIEW_EXHAUSTED,
+                question=(
+                    f"The reviewer still rejects '{task.title}' after {task.revision_count} revision(s). "
+                    "How should we proceed?"
+                ),
+                context=f"Latest reviewer feedback (score {verdict.score}/10):\n{verdict.feedback}\n{issues}",
+                options=REVIEW_EXHAUSTED_OPTIONS,
+                agent_id=reviewer.id,
+            )
+            return ReviewResult(
+                verdict="escalated", feedback=verdict.feedback, escalation_id=str(escalation.id)
+            )
+
+        task.execution_metadata = {**task.execution_metadata, "review_score": verdict.score}
         await session.execute(
             update(Artifact).where(Artifact.task_id == task.id).values(review_status=ReviewStatus.ACCEPTED)
         )

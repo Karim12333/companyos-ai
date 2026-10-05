@@ -10,6 +10,7 @@ from companyos.api.schemas import (
     ActivityOut,
     ApprovalOut,
     ArtifactOut,
+    EscalationOut,
     MessageOut,
     ObjectiveCreate,
     ObjectiveDetailOut,
@@ -22,6 +23,7 @@ from companyos.models import (
     AgentMessage,
     Approval,
     Artifact,
+    Escalation,
     Objective,
     Project,
     Task,
@@ -149,6 +151,13 @@ async def get_objective(objective_id: uuid.UUID, org: Org, session: OrgSession) 
             .limit(200)
         )
     ).all()
+    escalations = (
+        await session.scalars(
+            select(Escalation)
+            .where(Escalation.objective_id == objective.id)
+            .order_by(Escalation.created_at.desc())
+        )
+    ).all()
     runs = (
         await session.scalars(
             select(WorkflowRun)
@@ -162,6 +171,7 @@ async def get_objective(objective_id: uuid.UUID, org: Org, session: OrgSession) 
         "messages": [MessageOut.model_validate(item).model_dump(mode="json") for item in messages],
         "approvals": [ApprovalOut.model_validate(item).model_dump(mode="json") for item in approvals],
         "artifacts": [ArtifactOut.model_validate(item).model_dump(mode="json") for item in artifacts],
+        "escalations": [EscalationOut.model_validate(item).model_dump(mode="json") for item in escalations],
         "activity": [ActivityOut.model_validate(item).model_dump(mode="json") for item in activity],
         "workflow_runs": [
             {

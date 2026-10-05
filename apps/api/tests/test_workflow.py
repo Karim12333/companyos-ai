@@ -1,64 +1,24 @@
-import asyncio
-import os
 import uuid
-from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from typing import Any
 
 import pytest
 from temporalio.client import Client
-from temporalio.testing import WorkflowEnvironment
 
-from companyos.config import get_settings
 from companyos.providers.email import RecordingEmailProvider
-from companyos.providers.llm import LLMError, LLMResponse
 from companyos.providers.mock_llm import MockLLMProvider
 from companyos.services.integrations import set_llm_override
 from companyos.tools import gateway
 from companyos.tools.registry import ToolContext
-from companyos.worker import build_worker
-from companyos.workflows.client import set_temporal_client
 from tests.conftest import Tenant
-
-TERMINAL = {"COMPLETED", "COMPLETED_WITH_ISSUES", "FAILED", "CANCELLED"}
-OBJECTIVE = {
-    "title": "AI meeting assistant launch",
-    "instruction": "Research and prepare a launch plan for an AI meeting assistant with marketing messaging.",
-}
-
-
-class SlowMock(MockLLMProvider):
-    """Mock model with latency so parallel execution is observable."""
-
-    async def complete(self, **kwargs: Any) -> LLMResponse:
-        await asyncio.sleep(0.15)
-        return await super().complete(**kwargs)
-
-
-class FailingProductManager(SlowMock):
-    async def complete(self, **kwargs: Any) -> LLMResponse:
-        hints = kwargs.get("hints") or {}
-        if kwargs.get("purpose") == "execute" and hints.get("role_key") == "product_manager":
-            raise LLMError("Model refused the request", recoverable=False)
-        return await super().complete(**kwargs)
-
-
-@pytest.fixture(scope="module")
-async def temporal() -> AsyncIterator[Client]:
-    address = os.environ.get("TEST_TEMPORAL_ADDRESS")
-    if address:
-        client = await Client.connect(address)
-        environment = None
-    else:
-        environment = await WorkflowEnvironment.start_local()
-        client = environment.client
-    set_temporal_client(client)
-    worker = build_worker(client, get_settings().temporal_task_queue)
-    async with worker:
-        yield client
-    set_temporal_client(None)
-    if environment:
-        await environment.shutdown()
+from tests.workflow_support import (
+    TERMINAL,
+    FailingProductManager,
+    SlowMock,
+    create,
+    pending_approvals,
+    wait_for,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -66,32 +26,6 @@ def slow_mock() -> Any:
     set_llm_override(SlowMock())
     yield
     set_llm_override(None)
-
-
-async def wait_for(
-    tenant: Tenant, objective_id: str, predicate: Callable[[dict[str, Any]], bool], seconds: float = 180
-) -> dict[str, Any]:
-    deadline = asyncio.get_running_loop().time() + seconds
-    while True:
-        detail = (await tenant.client.get(tenant.url(f"/objectives/{objective_id}"))).json()
-        if predicate(detail):
-            return detail
-        if asyncio.get_running_loop().time() > deadline:
-            raise AssertionError(f"Timed out; objective status {detail['objective']['status']}")
-        await asyncio.sleep(0.3)
-
-
-async def create(tenant: Tenant, **overrides: Any) -> str:
-    response = await tenant.client.post(
-        tenant.url("/objectives"), json={**OBJECTIVE, **overrides}, headers=tenant.headers
-    )
-    assert response.status_code == 201, response.text
-    assert response.json()["workflow_error"] is None
-    return response.json()["objective"]["id"]
-
-
-def pending_approvals(detail: dict[str, Any]) -> list[dict[str, Any]]:
-    return [item for item in detail["approvals"] if item["status"] == "PENDING"]
 
 
 async def test_objective_full_lifecycle(

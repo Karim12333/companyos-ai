@@ -17,6 +17,8 @@ from companyos.api.schemas import (
     ApprovalOut,
     ArtifactOut,
     ArtifactVersionOut,
+    EscalationDecision,
+    EscalationOut,
     FeedbackCreate,
     FeedbackOut,
     InboxItemOut,
@@ -28,6 +30,7 @@ from companyos.models import (
     Approval,
     Artifact,
     ArtifactVersion,
+    Escalation,
     InboxItem,
     Objective,
     Task,
@@ -36,6 +39,7 @@ from companyos.models.enums import ActorType, ApprovalStatus, ArtifactApprovalSt
 from companyos.rbac import Permission
 from companyos.services import artifacts as artifact_service
 from companyos.services.approvals import ApprovalStateError, decide_approval, objective_workflow_id
+from companyos.services.escalations import EscalationError, resolve_escalation
 from companyos.services.objectives import signal_workflow
 
 router = APIRouter(prefix="/orgs/{org_id}", tags=["outputs"])
@@ -230,6 +234,72 @@ async def decide(approval_id: uuid.UUID, body: ApprovalDecision, org: Org, sessi
     # The workflow also reconciles with the database periodically if this signal is lost
     await signal_workflow(workflow_id, "approval_decided", str(approval.id))
     return approval
+
+
+# ---------- escalations ----------
+
+
+@router.get("/escalations", response_model=list[EscalationOut])
+async def list_escalations(
+    org: Org, session: OrgSession, status_filter: str | None = Query(default=None, alias="status")
+) -> list[Escalation]:
+    query = select(Escalation).where(Escalation.organization_id == org.organization_id)
+    if status_filter:
+        query = query.where(Escalation.status == status_filter.upper())
+    return list((await session.scalars(query.order_by(Escalation.created_at.desc()).limit(200))).all())
+
+
+@router.get("/escalations/{escalation_id}")
+async def get_escalation(escalation_id: uuid.UUID, org: Org, session: OrgSession) -> dict[str, Any]:
+    escalation = await session.scalar(
+        select(Escalation).where(
+            Escalation.id == escalation_id, Escalation.organization_id == org.organization_id
+        )
+    )
+    if escalation is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Escalation not found")
+    objective = await session.get(Objective, escalation.objective_id) if escalation.objective_id else None
+    task = await session.get(Task, escalation.task_id) if escalation.task_id else None
+    artifacts = (
+        (await session.scalars(select(Artifact).where(Artifact.task_id == escalation.task_id))).all()
+        if escalation.task_id
+        else []
+    )
+    return {
+        "escalation": EscalationOut.model_validate(escalation).model_dump(mode="json"),
+        "objective": {"id": objective.id, "title": objective.title} if objective else None,
+        "task": {"id": task.id, "title": task.title, "status": task.status.value} if task else None,
+        "artifacts": [ArtifactOut.model_validate(item).model_dump(mode="json") for item in artifacts],
+    }
+
+
+@router.post("/escalations/{escalation_id}/resolve", response_model=EscalationOut)
+async def resolve(
+    escalation_id: uuid.UUID, body: EscalationDecision, org: Org, session: OrgSession
+) -> Escalation:
+    org.require(Permission.DECIDE_APPROVAL)
+    try:
+        escalation = await resolve_escalation(
+            session,
+            organization_id=org.organization_id,
+            escalation_id=escalation_id,
+            option=body.option,
+            note=body.note,
+            user_id=org.user.id,
+        )
+    except LookupError as error:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+    except EscalationError as error:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+    workflow_id = (
+        await session.scalar(select(Objective.workflow_id).where(Objective.id == escalation.objective_id))
+        if escalation.objective_id
+        else None
+    )
+    await session.commit()
+    # The workflow also polls the database if this signal is lost
+    await signal_workflow(workflow_id, "escalation_resolved", str(escalation.id))
+    return escalation
 
 
 # ---------- inbox ----------

@@ -7,7 +7,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from companyos.db import tenant_scope
-from companyos.events import queue_realtime, record_activity
+from companyos.events import record_activity
 from companyos.models import (
     Objective,
     OrganizationSettings,
@@ -20,6 +20,7 @@ from companyos.models.enums import (
     ObjectiveStatus,
     TaskStatus,
 )
+from companyos.services.objective_status import refresh_objective_status
 from companyos.workflows.activities.shared import (
     NON_RETRYABLE,
     ids,
@@ -119,19 +120,10 @@ async def get_ready_tasks(data: ObjectiveInput) -> ReadySnapshot:
         total = len(tasks) or 1
         done = sum(1 for task in tasks if task.status == TaskStatus.COMPLETED)
         objective.progress = int(done * 100 / total)
-        statuses = {task.status for task in tasks}
-        if objective.is_paused:
-            objective.status, objective.current_stage = ObjectiveStatus.PAUSED, "Paused"
-        elif TaskStatus.WAITING_FOR_APPROVAL in statuses:
-            objective.status, objective.current_stage = (
-                ObjectiveStatus.WAITING_FOR_APPROVAL,
-                "Waiting for CEO approval",
-            )
-        elif TaskStatus.REVIEW in statuses:
-            objective.status, objective.current_stage = ObjectiveStatus.REVIEWING, "Reviewing deliverables"
-        else:
-            objective.status, objective.current_stage = ObjectiveStatus.RUNNING, "Executing"
-        queue_realtime(session, organization_id, "objective", {"objective_id": str(objective_id)})
+        if objective.status == ObjectiveStatus.CANCELLED:
+            # Invariant: a cancelled objective never starts new work
+            ready = []
+        await refresh_objective_status(session, objective_id)
 
         settings = await session.scalar(
             select(OrganizationSettings).where(OrganizationSettings.organization_id == organization_id)

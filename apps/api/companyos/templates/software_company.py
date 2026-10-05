@@ -1,6 +1,12 @@
 from companyos.templates.types import AgentSpec, DepartmentSpec, OrganizationTemplate
 
-BASE_TOOLS = ["search_company_knowledge", "create_artifact", "read_artifact", "send_message"]
+BASE_TOOLS = [
+    "search_company_knowledge",
+    "create_artifact",
+    "read_artifact",
+    "send_message",
+    "escalate_to_ceo",
+]
 
 SOFTWARE_COMPANY = OrganizationTemplate(
     key="software_ai_company",

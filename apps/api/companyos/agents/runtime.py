@@ -39,6 +39,7 @@ class AgentRunResult:
     approval_ids: list[str]
     artifact_ids: list[str]
     trace: list[dict[str, Any]]
+    escalation_ids: list[str] = field(default_factory=list)
 
 
 class AgentState(TypedDict):
@@ -48,6 +49,7 @@ class AgentState(TypedDict):
     hit_limit: bool
     approval_ids: list[str]
     artifact_ids: list[str]
+    escalation_ids: list[str]
     trace: list[dict[str, Any]]
 
 
@@ -119,6 +121,7 @@ def build_agent_graph(run: AgentRunInput) -> Any:
         trace = list(state["trace"])
         approvals = list(state["approval_ids"])
         artifacts = list(state["artifact_ids"])
+        escalations = list(state["escalation_ids"])
         for call in last.tool_calls:
             outcome = await gateway.invoke(context, call.name, call.arguments)
             messages.append(
@@ -129,7 +132,19 @@ def build_agent_graph(run: AgentRunInput) -> Any:
                 approvals.append(str(outcome.approval_id))
             if "artifact_id" in outcome.data:
                 artifacts.append(str(outcome.data["artifact_id"]))
-        return {"messages": messages, "trace": trace, "approval_ids": approvals, "artifact_ids": artifacts}
+            if "escalation_id" in outcome.data:
+                escalations.append(str(outcome.data["escalation_id"]))
+        update: dict[str, Any] = {
+            "messages": messages,
+            "trace": trace,
+            "approval_ids": approvals,
+            "artifact_ids": artifacts,
+            "escalation_ids": escalations,
+        }
+        if escalations:
+            # The task now waits for the CEO; the agent must not keep working on it
+            update["final_output"] = "Escalated to the CEO; waiting for a decision."
+        return update
 
     async def force_finish(state: AgentState) -> dict[str, Any]:
         # Hard stop: no endless loops regardless of what the model wants
@@ -144,6 +159,8 @@ def build_agent_graph(run: AgentRunInput) -> Any:
         return "act"
 
     def after_act(state: AgentState) -> str:
+        if state["escalation_ids"]:
+            return END
         return "force_finish" if state["iterations"] >= run.max_iterations else "think"
 
     graph = StateGraph(AgentState)
@@ -152,7 +169,9 @@ def build_agent_graph(run: AgentRunInput) -> Any:
     graph.add_node("force_finish", force_finish)
     graph.add_edge(START, "think")
     graph.add_conditional_edges("think", after_think, {"act": "act", END: END})
-    graph.add_conditional_edges("act", after_act, {"think": "think", "force_finish": "force_finish"})
+    graph.add_conditional_edges(
+        "act", after_act, {"think": "think", "force_finish": "force_finish", END: END}
+    )
     graph.add_edge("force_finish", END)
     return graph.compile()
 
@@ -169,6 +188,7 @@ async def run_agent(run: AgentRunInput) -> AgentRunResult:
         "hit_limit": False,
         "approval_ids": [],
         "artifact_ids": [],
+        "escalation_ids": [],
         "trace": [],
     }
     state = await graph.ainvoke(initial, config={"recursion_limit": run.max_iterations * 3 + 5})
@@ -179,4 +199,5 @@ async def run_agent(run: AgentRunInput) -> AgentRunResult:
         approval_ids=state["approval_ids"],
         artifact_ids=state["artifact_ids"],
         trace=state["trace"],
+        escalation_ids=state["escalation_ids"],
     )

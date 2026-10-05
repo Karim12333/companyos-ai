@@ -20,6 +20,8 @@ class TenantContext:
     organization_id: uuid.UUID | None = None
     user_id: uuid.UUID | None = None
     bypass_rls: bool = False
+    # Read pages built from several queries see one consistent snapshot
+    snapshot: bool = False
 
 
 def get_engine() -> AsyncEngine:
@@ -50,6 +52,8 @@ def _apply_tenant_context(session: Session, _transaction: Any, connection: Any) 
     context: TenantContext | None = session.info.get("tenant_context")
     if context is None:
         return
+    if context.snapshot:
+        connection.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
     connection.execute(
         text(
             "SELECT set_config('app.org_id', :org, true), set_config('app.user_id', :user, true), "

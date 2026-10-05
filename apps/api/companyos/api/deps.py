@@ -116,10 +116,13 @@ async def authorize_stream(request: Request, organization_id: uuid.UUID) -> None
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
 
 
-async def org_session(org: Annotated[OrgContext, Depends(get_org)]) -> AsyncIterator[AsyncSession]:
-    async for session in _session_for(
-        TenantContext(organization_id=org.organization_id, user_id=org.user.id)
-    ):
+async def org_session(
+    request: Request, org: Annotated[OrgContext, Depends(get_org)]
+) -> AsyncIterator[AsyncSession]:
+    context = TenantContext(
+        organization_id=org.organization_id, user_id=org.user.id, snapshot=request.method in SAFE_METHODS
+    )
+    async for session in _session_for(context):
         yield session
 
 

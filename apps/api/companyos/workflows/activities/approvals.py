@@ -17,6 +17,7 @@ from companyos.models.enums import (
 )
 from companyos.services.integrations import resolve_ai
 from companyos.services.notifications import notify_approval_required
+from companyos.services.objective_status import refresh_objective_status
 from companyos.tools import gateway
 from companyos.tools.registry import ToolContext
 from companyos.workflows.activities.shared import (
@@ -84,3 +85,4 @@ async def resolve_task_approvals(ref: TaskRef) -> None:
         if notes:
             task.output_summary = (task.output_summary + "\n\n" + "\n".join(notes)).strip()[:4000]
         task.status = TaskStatus.REVIEW if task.requires_review else TaskStatus.RUNNING
+        await refresh_objective_status(session, task.objective_id)

@@ -17,6 +17,7 @@ from companyos.api.schemas import (
     ArtifactOut,
     DepartmentCreate,
     DepartmentOut,
+    EscalationOut,
     MessageOut,
     ObjectiveOut,
     TaskOut,
@@ -31,6 +32,7 @@ from companyos.models import (
     Approval,
     Artifact,
     Department,
+    Escalation,
     InboxItem,
     ModelUsage,
     Objective,
@@ -41,6 +43,7 @@ from companyos.models import (
 from companyos.models.enums import (
     ActorType,
     ApprovalStatus,
+    EscalationStatus,
     InboxCategory,
     ObjectiveStatus,
     TaskStatus,
@@ -118,6 +121,13 @@ async def headquarters(org: Org, session: OrgSession) -> dict[str, Any]:
             select(Approval)
             .where(Approval.organization_id == organization_id, Approval.status == ApprovalStatus.PENDING)
             .order_by(Approval.created_at.desc())
+        )
+    ).all()
+    open_escalations = (
+        await session.scalars(
+            select(Escalation)
+            .where(Escalation.organization_id == organization_id, Escalation.status == EscalationStatus.OPEN)
+            .order_by(Escalation.created_at.desc())
         )
     ).all()
     failures = (
@@ -213,6 +223,7 @@ async def headquarters(org: Org, session: OrgSession) -> dict[str, Any]:
             "agents_working": agents_working or 0,
             "tasks_completed_today": tasks_completed_today or 0,
             "waiting_for_approval": len(pending_approvals),
+            "decisions_required": len(open_escalations),
         },
         "departments": [
             {
@@ -238,6 +249,9 @@ async def headquarters(org: Org, session: OrgSession) -> dict[str, Any]:
             for task, agent, objective_title in live
         ],
         "attention": {
+            "escalations": [
+                EscalationOut.model_validate(item).model_dump(mode="json") for item in open_escalations[:6]
+            ],
             "approvals": [
                 ApprovalOut.model_validate(item).model_dump(mode="json") for item in pending_approvals[:6]
             ],

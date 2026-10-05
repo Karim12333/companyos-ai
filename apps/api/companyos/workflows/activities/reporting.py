@@ -15,6 +15,7 @@ from companyos.models import (
     Approval,
     Artifact,
     Department,
+    Escalation,
     InboxItem,
     Objective,
     Organization,
@@ -24,7 +25,6 @@ from companyos.models import (
 from companyos.models.enums import (
     OBJECTIVE_TERMINAL,
     ActorType,
-    AgentStatus,
     ApprovalStatus,
     InboxCategory,
     ObjectiveStatus,
@@ -34,6 +34,7 @@ from companyos.models.enums import (
 )
 from companyos.providers.llm import LLMError
 from companyos.services import artifacts as artifact_service
+from companyos.services.escalations import cancel_open_escalations
 from companyos.services.integrations import resolve_ai
 from companyos.services.notifications import notify_objective_finished
 from companyos.services.reports import render_report_markdown
@@ -43,6 +44,7 @@ from companyos.workflows.activities.shared import (
     ids,
     model_for,
     now,
+    set_agent_idle_if_free,
 )
 from companyos.workflows.types import (
     FinalizeInput,
@@ -73,6 +75,7 @@ async def finalize_objective(data: FinalizeInput) -> str:
                 .where(InboxItem.objective_id == objective_id, InboxItem.action_required.is_(True))
                 .values(action_required=False, resolved_at=now())
             )
+            await cancel_open_escalations(session, objective_id)
             status = ObjectiveStatus.CANCELLED
         elif data.planning_error:
             status = ObjectiveStatus.FAILED
@@ -92,8 +95,12 @@ async def finalize_objective(data: FinalizeInput) -> str:
                     task.error_message = task.error_message or "Never became runnable"
             failed = [t for t in tasks if t.status in (TaskStatus.FAILED, TaskStatus.BLOCKED)]
             completed = [t for t in tasks if t.status == TaskStatus.COMPLETED]
-            if not failed:
+            # Work the CEO accepted despite reviewer rejection is delivered, but it is an issue
+            ceo_accepted = [t for t in completed if t.execution_metadata.get("accepted_by_ceo_after_review")]
+            if not failed and not ceo_accepted:
                 status = ObjectiveStatus.COMPLETED
+            elif not failed:
+                status = ObjectiveStatus.COMPLETED_WITH_ISSUES
             else:
                 status = ObjectiveStatus.COMPLETED_WITH_ISSUES if completed else ObjectiveStatus.FAILED
         stats = await _objective_stats(session, objective, tasks, status)
@@ -203,9 +210,9 @@ async def finalize_objective(data: FinalizeInput) -> str:
             .where(WorkflowRun.objective_id == objective_id, WorkflowRun.finished_at.is_(None))
             .values(status=status.value.lower(), finished_at=now())
         )
-        await session.execute(
-            update(Agent).where(Agent.organization_id == organization_id).values(status=AgentStatus.IDLE)
-        )
+        # Only this objective's agents, and only if they are not busy on another objective
+        for agent_id in {task.assigned_agent_id for task in tasks if task.assigned_agent_id}:
+            await set_agent_idle_if_free(session, agent_id)
         return status.value
 
 
@@ -227,6 +234,11 @@ async def _objective_stats(
     artifact_count = await session.scalar(
         select(func.count(Artifact.id)).where(Artifact.objective_id == objective.id)
     )
+    escalations = (
+        await session.scalars(
+            select(Escalation).where(Escalation.objective_id == objective.id).order_by(Escalation.created_at)
+        )
+    ).all()
     started = objective.started_at or objective.created_at
     revisions = sum(task.revision_count for task in tasks)
     return {
@@ -250,6 +262,20 @@ async def _objective_stats(
             }
             for t in tasks
             if t.status in (TaskStatus.FAILED, TaskStatus.BLOCKED)
+        ],
+        "escalations": [
+            {
+                "id": str(item.id),
+                "kind": item.kind.value,
+                "question": item.question[:500],
+                "status": item.status.value,
+                "decision": item.resolution_option,
+                "note": item.resolution_note[:500],
+            }
+            for item in escalations
+        ],
+        "accepted_by_ceo_after_review": [
+            t.title for t in tasks if t.execution_metadata.get("accepted_by_ceo_after_review")
         ],
         "revisions_requested": revisions,
         "issues_resolved": revisions,

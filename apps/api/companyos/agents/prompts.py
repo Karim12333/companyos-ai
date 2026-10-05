@@ -46,12 +46,15 @@ def task_prompt(
             f"\nREVISION REQUESTED (revision {task.revision_count}). Reviewer feedback:\n{review_feedback}\n"
             "Revise your deliverable and save it again with the same filename.\n"
         )
+    context_block = ""
+    if task.context:
+        context_block = f"\nTASK CONTEXT (includes CEO decisions; follow them):\n{task.context}\n"
     return f"""OBJECTIVE: {objective.title}
 CEO INSTRUCTION: {objective.instruction}
 
 YOUR TASK: {task.title}
 {task.instructions}
-
+{context_block}
 ACCEPTANCE CRITERIA:
 {criteria}
 

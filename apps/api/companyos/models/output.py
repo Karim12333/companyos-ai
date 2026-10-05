@@ -19,6 +19,8 @@ from companyos.models.base import Base, TenantMixin, str_enum
 from companyos.models.enums import (
     ApprovalStatus,
     ArtifactApprovalStatus,
+    EscalationKind,
+    EscalationStatus,
     FeedbackStatus,
     InboxCategory,
     NotificationStatus,
@@ -167,3 +169,27 @@ class OrganizationPreference(TenantMixin, Base):
         ForeignKey("agent_feedback.id", ondelete="SET NULL")
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class Escalation(TenantMixin, Base):
+    """A question the organization cannot safely answer on its own; only the affected task waits."""
+
+    __tablename__ = "escalations"
+    __table_args__ = (Index("ix_escalations_objective_status", "objective_id", "status"),)
+
+    objective_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("objectives.id", ondelete="CASCADE"))
+    task_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"), index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agents.id", ondelete="SET NULL"))
+    approval_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("approvals.id", ondelete="SET NULL"))
+    kind: Mapped[EscalationKind] = mapped_column(str_enum(EscalationKind, 48))
+    question: Mapped[str] = mapped_column(Text)
+    context: Mapped[str] = mapped_column(Text, default="")
+    options: Mapped[list] = mapped_column(JSONB, default=list)
+    status: Mapped[EscalationStatus] = mapped_column(
+        str_enum(EscalationStatus), default=EscalationStatus.OPEN
+    )
+    resolution_option: Mapped[str | None] = mapped_column(String(64))
+    resolution_note: Mapped[str] = mapped_column(Text, default="")
+    resolved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

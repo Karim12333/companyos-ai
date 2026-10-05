@@ -25,6 +25,7 @@ from companyos.models.enums import (
     TaskStatus,
 )
 from companyos.services.integrations import ResolvedAI
+from companyos.services.objective_status import refresh_objective_status
 
 MAX_ATTEMPTS = 3
 NON_RETRYABLE = "NonRetryableTaskError"
@@ -120,6 +121,7 @@ async def fail_task(
     )
     await session.flush()
     await set_agent_idle_if_free(session, task.assigned_agent_id)
+    await refresh_objective_status(session, task.objective_id)
 
 
 async def finish_task(session: AsyncSession, task: Task) -> None:
@@ -163,3 +165,4 @@ async def finish_task(session: AsyncSession, task: Task) -> None:
     )
     await session.flush()
     await set_agent_idle_if_free(session, task.assigned_agent_id)
+    await refresh_objective_status(session, task.objective_id)

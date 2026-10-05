@@ -12,6 +12,7 @@ from companyos.events import record_activity
 from companyos.models import (
     Agent,
     Artifact,
+    Escalation,
     Objective,
     Organization,
     OrganizationSettings,
@@ -23,6 +24,7 @@ from companyos.models.enums import (
     ActorType,
     AgentStatus,
     ErrorCategory,
+    EscalationStatus,
     ObjectiveStatus,
     ReviewStatus,
     TaskStatus,
@@ -31,6 +33,7 @@ from companyos.observability import logger
 from companyos.providers.llm import LLMError
 from companyos.services import artifacts as artifact_service
 from companyos.services.integrations import resolve_ai
+from companyos.services.objective_status import refresh_objective_status
 from companyos.services.usage import BudgetExceeded
 from companyos.workflows.activities.shared import (
     MAX_ATTEMPTS,
@@ -64,6 +67,35 @@ async def execute_task(ref: TaskRef) -> ExecuteResult:
             return ExecuteResult(status="failed")
         if task.status == TaskStatus.COMPLETED:
             return ExecuteResult(status="completed", requires_review=False)
+        if task.status == TaskStatus.NEEDS_ATTENTION:
+            # Retried after escalating: keep waiting on the same open escalations, never orphan them
+            open_ids = (
+                await session.scalars(
+                    select(Escalation.id).where(
+                        Escalation.task_id == task.id, Escalation.status == EscalationStatus.OPEN
+                    )
+                )
+            ).all()
+            if open_ids:
+                return ExecuteResult(
+                    status="escalated",
+                    requires_review=task.requires_review,
+                    escalation_ids=[str(item) for item in open_ids],
+                )
+        if task.status == TaskStatus.NEEDS_ATTENTION or (
+            objective.is_paused and task.status == TaskStatus.READY
+        ):
+            # Invariant: work waiting on the CEO (or a paused objective) never starts silently
+            return ExecuteResult(status="skipped")
+        unfinished = await session.scalar(
+            select(TaskDependency.id)
+            .join(Task, Task.id == TaskDependency.depends_on_task_id)
+            .where(TaskDependency.task_id == task.id, Task.status != TaskStatus.COMPLETED)
+            .limit(1)
+        )
+        if unfinished is not None:
+            # Invariant: a task never runs before all of its dependencies completed
+            return ExecuteResult(status="skipped")
         agent = await session.get(Agent, task.assigned_agent_id) if task.assigned_agent_id else None
         if agent is None or not agent.is_active:
             await fail_task(
@@ -176,7 +208,8 @@ async def execute_task(ref: TaskRef) -> ExecuteResult:
         objective = await session.get(Objective, objective_id)
         assert task is not None and task_run_row is not None and objective is not None
         artifact_ids = list(dict.fromkeys(result.artifact_ids))
-        if not artifact_ids and result.final_output.strip():
+        escalated = bool(result.escalation_ids)
+        if not artifact_ids and result.final_output.strip() and not escalated:
             # Agent answered without saving: persist the answer so nothing is lost
             artifact, _ = await artifact_service.save_artifact(
                 session,
@@ -213,6 +246,16 @@ async def execute_task(ref: TaskRef) -> ExecuteResult:
         )
         if objective.status == ObjectiveStatus.CANCELLED:
             return ExecuteResult(status="failed")
+        if escalated:
+            # Task stays NEEDS_ATTENTION (set by the escalation) until the CEO decides
+            await session.flush()
+            await set_agent_idle_if_free(session, task.assigned_agent_id)
+            return ExecuteResult(
+                status="escalated",
+                approval_ids=result.approval_ids,
+                requires_review=task.requires_review,
+                escalation_ids=result.escalation_ids,
+            )
         if result.approval_ids:
             task.status = TaskStatus.WAITING_FOR_APPROVAL
         elif task.requires_review:
@@ -230,6 +273,7 @@ async def execute_task(ref: TaskRef) -> ExecuteResult:
         )
         await session.flush()
         await set_agent_idle_if_free(session, task.assigned_agent_id)
+        await refresh_objective_status(session, objective_id)
         return ExecuteResult(
             status="completed", approval_ids=result.approval_ids, requires_review=task.requires_review
         )

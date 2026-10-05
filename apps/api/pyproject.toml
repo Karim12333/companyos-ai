@@ -54,6 +54,7 @@ ignore = ["S101", "B008", "RUF012", "S311", "E501"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S105", "S106"]
 "alembic/*" = ["S608"]
+"companyos/migration_utils.py" = ["S608"]
 
 [tool.mypy]
 python_version = "3.12"

@@ -21,6 +21,7 @@ class ObjectiveStatus(StrEnum):
     WAITING = "WAITING"
     WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
     REVIEWING = "REVIEWING"
+    NEEDS_ATTENTION = "NEEDS_ATTENTION"
     PAUSED = "PAUSED"
     COMPLETED = "COMPLETED"
     COMPLETED_WITH_ISSUES = "COMPLETED_WITH_ISSUES"
@@ -43,6 +44,7 @@ class TaskStatus(StrEnum):
     BLOCKED = "BLOCKED"
     REVIEW = "REVIEW"
     WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
+    NEEDS_ATTENTION = "NEEDS_ATTENTION"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -66,6 +68,9 @@ class ErrorCategory(StrEnum):
     VALIDATION = "validation"
     TIMEOUT = "timeout"
     DEPENDENCY = "dependency"
+    REVIEW_EXHAUSTED = "review_exhausted"
+    ESCALATION = "escalation"
+    EXTERNAL_ACTION = "external_action"
     INTERNAL = "internal"
 
 
@@ -160,3 +165,18 @@ class IntegrationStatus(StrEnum):
     NOT_CONFIGURED = "not_configured"
     ERROR = "error"
     DISABLED = "disabled"
+
+
+class EscalationStatus(StrEnum):
+    OPEN = "OPEN"
+    RESOLVED = "RESOLVED"
+    CANCELLED = "CANCELLED"
+
+
+class EscalationKind(StrEnum):
+    REVIEW_EXHAUSTED = "review_exhausted"
+    DECISION_REQUIRED = "decision_required"
+    INSUFFICIENT_INFORMATION = "insufficient_information"
+    CONFLICTING_EVIDENCE = "conflicting_evidence"
+    AMBIGUOUS_SCOPE = "ambiguous_scope"
+    ACTION_OUTCOME_UNKNOWN = "action_outcome_unknown"

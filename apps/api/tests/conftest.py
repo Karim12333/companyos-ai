@@ -10,6 +10,8 @@ import pytest
 from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
+from temporalio.client import Client
+from temporalio.testing import WorkflowEnvironment
 
 from alembic import command
 from companyos.config import get_settings
@@ -18,6 +20,8 @@ from companyos.events import close_redis, get_redis
 from companyos.main import create_app
 from companyos.providers.email import RecordingEmailProvider, set_email_override
 from companyos.providers.storage import MemoryStorage, set_storage_override
+from companyos.worker import build_worker
+from companyos.workflows.client import set_temporal_client
 
 TEST_ENV = {
     "DATABASE_URL": "postgresql+asyncpg://companyos_app:companyos_app_dev@localhost:5442/companyos_test",
@@ -134,3 +138,21 @@ async def other_tenant(app: Any) -> AsyncIterator[Tenant]:
     created = await make_tenant(app, "Globex")
     yield created
     await created.client.aclose()
+
+
+@pytest.fixture(scope="session")
+async def temporal() -> AsyncIterator[Client]:
+    address = os.environ.get("TEST_TEMPORAL_ADDRESS")
+    if address:
+        client = await Client.connect(address)
+        environment = None
+    else:
+        environment = await WorkflowEnvironment.start_local()
+        client = environment.client
+    set_temporal_client(client)
+    worker = build_worker(client, get_settings().temporal_task_queue)
+    async with worker:
+        yield client
+    set_temporal_client(None)
+    if environment:
+        await environment.shutdown()

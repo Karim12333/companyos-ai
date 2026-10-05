@@ -9,11 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from companyos.events import record_activity
 from companyos.models import Agent, AgentMessage, AgentRelationship, Artifact, Integration, Task
-from companyos.models.enums import ActorType, MessageKind, RiskLevel, TaskStatus
+from companyos.models.enums import ActorType, EscalationKind, MessageKind, RiskLevel, TaskStatus
 from companyos.providers.llm import LLMProvider
 from companyos.providers.web_search import WebSearchUnavailable, tavily_search
 from companyos.services import artifacts as artifact_service
 from companyos.services import knowledge as knowledge_service
+from companyos.services.escalations import agent_options, create_escalation
 from companyos.services.integrations import get_integration_secret
 
 MAX_DELEGATIONS_PER_TASK = 3
@@ -109,6 +110,20 @@ class ScheduleSocialPostArgs(BaseModel):
     platform: str = Field(pattern=r"^(linkedin|x|instagram|facebook)$")
     content: str = Field(min_length=5, max_length=3000)
     publish_at: str = Field(max_length=40, description="ISO date/time for the scheduled draft")
+
+
+class EscalationOptionArgs(BaseModel):
+    label: str = Field(min_length=2, max_length=120)
+    description: str = Field(default="", max_length=500)
+
+
+class EscalateArgs(BaseModel):
+    kind: str = Field(
+        pattern=r"^(decision_required|insufficient_information|conflicting_evidence|ambiguous_scope)$"
+    )
+    question: str = Field(min_length=10, max_length=2000)
+    context: str = Field(default="", max_length=6000)
+    options: list[EscalationOptionArgs] = Field(default_factory=list, max_length=4)
 
 
 class SendExternalEmailArgs(BaseModel):
@@ -370,6 +385,27 @@ async def send_external_email(
     return ToolResult(content="Email recorded in the sandbox; no external email integration is connected.")
 
 
+async def escalate_to_ceo(ctx: ToolContext, session: AsyncSession, args: EscalateArgs) -> ToolResult:
+    if ctx.task_id is None:
+        raise ToolExecutionError("Escalation requires a task")
+    task = await session.get(Task, ctx.task_id)
+    if task is None or task.organization_id != ctx.organization_id:
+        raise ToolExecutionError("Task not found")
+    escalation = await create_escalation(
+        session,
+        task=task,
+        kind=EscalationKind(args.kind),
+        question=args.question,
+        context=args.context,
+        options=agent_options([option.model_dump() for option in args.options]),
+        agent_id=ctx.agent_id,
+    )
+    return ToolResult(
+        content="Escalated to the CEO. Stop working on this task now; it resumes after the CEO decides.",
+        data={"escalation_id": str(escalation.id)},
+    )
+
+
 TOOL_REGISTRY: dict[str, ToolDefinition] = {
     tool.key: tool
     for tool in [
@@ -407,6 +443,14 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
             RiskLevel.AUTONOMOUS,
             DelegateTaskArgs,
             delegate_task,
+        ),
+        ToolDefinition(
+            "escalate_to_ceo",
+            "Ask the CEO for a decision when you cannot safely continue: a business decision is needed, "
+            "information is missing, evidence conflicts or the scope is ambiguous. Use sparingly.",
+            RiskLevel.AUTONOMOUS,
+            EscalateArgs,
+            escalate_to_ceo,
         ),
         ToolDefinition(
             "web_search",
