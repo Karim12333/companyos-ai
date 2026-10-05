@@ -80,7 +80,13 @@ async def plan_objective(data: ObjectiveInput) -> int:
         system_prompt = agent_system_prompt(
             coordinator, organization.name, await preferences(session, organization_id, coordinator.id)
         )
-        objective_snapshot = (objective.title, objective.instruction, objective.context)
+        ceo_criteria = list(objective.acceptance_criteria or [])
+        criteria_context = (
+            "\nCEO success criteria (keep them):\n" + "\n".join(f"- {item}" for item in ceo_criteria)
+            if ceo_criteria
+            else ""
+        )
+        objective_snapshot = (objective.title, objective.instruction, objective.context + criteria_context)
         coordinator_id = coordinator.id
         coordinator.status = AgentStatus.WORKING
 
@@ -161,6 +167,11 @@ async def plan_objective(data: ObjectiveInput) -> int:
         objective.status = ObjectiveStatus.RUNNING
         objective.current_stage = "Executing"
         objective.plan_summary = plan.summary
+        merged = list(objective.acceptance_criteria or [])
+        for item in plan.objective_acceptance_criteria:
+            if item.strip() and item.strip() not in merged:
+                merged.append(item.strip())
+        objective.acceptance_criteria = merged[:8]
         await session.execute(update(Agent).where(Agent.id == coordinator_id).values(status=AgentStatus.IDLE))
         await record_activity(
             session,

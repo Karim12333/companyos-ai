@@ -8,7 +8,7 @@ from temporalio import activity
 
 from companyos.agents.metered import MeteredLLM, MeteringScope
 from companyos.agents.prompts import agent_system_prompt
-from companyos.agents.reporting import write_report
+from companyos.agents.reporting import normalize_assessment, write_report
 from companyos.db import tenant_scope
 from companyos.events import record_activity
 from companyos.models import (
@@ -17,6 +17,7 @@ from companyos.models import (
     Artifact,
     Department,
     Escalation,
+    Evidence,
     InboxItem,
     Objective,
     Organization,
@@ -106,6 +107,7 @@ async def finalize_objective(data: FinalizeInput) -> str:
             else:
                 status = ObjectiveStatus.COMPLETED_WITH_ISSUES if completed else ObjectiveStatus.FAILED
         stats = await _objective_stats(session, objective, tasks, status)
+        evidence_refs = {item["ref"] for item in stats["evidence"]}
         reporter = await agent_by_role(session, organization_id, "executive_reporter")
         organization = await session.get(Organization, organization_id)
         assert organization is not None
@@ -144,7 +146,9 @@ async def finalize_objective(data: FinalizeInput) -> str:
             stats=stats,
             deliverables="\n\n".join(deliverables),
         )
-        narrative_payload = narrative.model_dump()
+        narrative_payload = normalize_assessment(
+            narrative.model_dump(), list(stats.get("acceptance_criteria", [])), evidence_refs
+        )
     except (LLMError, BudgetExceeded) as error:
         narrative_payload = {
             "headline": f"{stats['objective_title']} — {status.value}",
@@ -158,7 +162,14 @@ async def finalize_objective(data: FinalizeInput) -> str:
     async with tenant_scope(organization_id) as session:
         objective = await session.get(Objective, objective_id)
         assert objective is not None
-        summary = {**stats, "narrative": narrative_payload}
+        # All tasks done is not the goal: a failed criterion or unachieved goal is an issue
+        assessments = narrative_payload.get("criteria_assessment", [])
+        goal_status = narrative_payload.get("goal_assessment", {}).get("status")
+        if status == ObjectiveStatus.COMPLETED and (
+            any(item.get("status") == "FAIL" for item in assessments) or goal_status == "NOT_ACHIEVED"
+        ):
+            status = ObjectiveStatus.COMPLETED_WITH_ISSUES
+        summary = {**stats, "status": status.value, "narrative": narrative_payload}
         objective.status = status
         objective.executive_summary = summary
         objective.completed_at = now()
@@ -243,6 +254,14 @@ async def _objective_stats(
             select(Escalation).where(Escalation.objective_id == objective.id).order_by(Escalation.created_at)
         )
     ).all()
+    evidence = (
+        await session.scalars(
+            select(Evidence)
+            .where(Evidence.objective_id == objective.id)
+            .order_by(Evidence.created_at)
+            .limit(40)
+        )
+    ).all()
     started = objective.started_at or objective.created_at
     revisions = sum(task.revision_count for task in tasks)
     return {
@@ -289,6 +308,18 @@ async def _objective_stats(
         "approvals_approved": sum(1 for a in approvals if a.status == ApprovalStatus.APPROVED),
         "approvals_rejected": sum(1 for a in approvals if a.status == ApprovalStatus.REJECTED),
         "cost_usd": float(objective.cost_usd or 0),
+        "acceptance_criteria": list(objective.acceptance_criteria or []),
+        "evidence": [
+            {
+                "ref": item.ref,
+                "kind": item.kind,
+                "claim": item.claim[:300],
+                "source_url": item.source_url,
+                "source_title": item.source_title,
+                "confidence": item.confidence,
+            }
+            for item in evidence
+        ],
     }
 
 

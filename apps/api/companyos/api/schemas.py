@@ -137,6 +137,7 @@ class ObjectiveCreate(BaseModel):
     target_date: datetime | None = None
     budget_usd: Decimal | None = Field(default=None, ge=0, le=10000)
     external_actions: Literal["require_approval", "deny"] = "require_approval"
+    success_criteria: list[str] = Field(default_factory=list, max_length=8)
 
 
 class ObjectiveOut(ORM):
@@ -160,6 +161,7 @@ class ObjectiveOut(ORM):
     approval_policy: dict[str, Any]
     plan_summary: str
     is_paused: bool
+    acceptance_criteria: list[str]
     issues: list[Any]
 
 

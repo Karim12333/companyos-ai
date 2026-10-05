@@ -5,6 +5,21 @@ from pydantic import BaseModel, Field, ValidationError
 
 from companyos.providers.llm import LLMMessage, LLMProvider, LLMResponse
 
+CRITERION_STATUSES = ("PASS", "PARTIAL", "FAIL", "UNKNOWN")
+GOAL_STATUSES = ("ACHIEVED", "PARTIALLY_ACHIEVED", "NOT_ACHIEVED", "UNKNOWN")
+
+
+class CriterionAssessment(BaseModel):
+    criterion: str
+    status: str = "UNKNOWN"
+    evidence: str = ""
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class GoalAssessment(BaseModel):
+    status: str = "UNKNOWN"
+    summary: str = ""
+
 
 class ReportNarrative(BaseModel):
     headline: str
@@ -13,6 +28,9 @@ class ReportNarrative(BaseModel):
     recommendation: str
     next_actions: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
+    criteria_assessment: list[CriterionAssessment] = Field(default_factory=list)
+    goal_assessment: GoalAssessment = Field(default_factory=GoalAssessment)
+    recommendation_evidence: list[str] = Field(default_factory=list)
 
 
 def report_prompt(stats: dict[str, Any], deliverables: str) -> str:
@@ -24,8 +42,14 @@ FACTS (authoritative, computed by the platform):
 DELIVERABLE EXCERPTS:
 {deliverables[:15000]}
 
+Assess EVERY objective acceptance criterion in FACTS as PASS, PARTIAL, FAIL or UNKNOWN, citing evidence refs
+(E-xxxxxx) from FACTS.evidence when they support it. Do not claim PASS without support. Then give an overall
+goal_assessment: ACHIEVED, PARTIALLY_ACHIEVED, NOT_ACHIEVED or UNKNOWN.
+
 Respond with JSON only:
-{{"headline": "...", "overall_assessment": "...", "key_findings": ["..."], "recommendation": "...",
+{{"headline": "...", "criteria_assessment": [{{"criterion": "...", "status": "PASS",
+"evidence": "...", "evidence_refs": ["E-..."]}}], "goal_assessment": {{"status": "...", "summary": "..."}},
+"recommendation_evidence": ["E-..."], "overall_assessment": "...", "key_findings": ["..."], "recommendation": "...",
 "next_actions": ["..."], "risks": ["..."]}}"""
 
 
@@ -52,3 +76,43 @@ async def write_report(
             recommendation="Review the deliverables directly.",
         )
     return narrative, response
+
+
+def normalize_assessment(
+    narrative: dict[str, Any], criteria: list[str], evidence_refs: set[str]
+) -> dict[str, Any]:
+    """Every objective criterion gets exactly one assessment; unknown statuses/refs are never trusted."""
+    given = {
+        item.get("criterion", "").strip().lower(): item for item in narrative.get("criteria_assessment", [])
+    }
+    by_index = narrative.get("criteria_assessment", [])
+    known = {criterion.strip().lower() for criterion in criteria}
+    assessments = []
+    for index, criterion in enumerate(criteria):
+        positional = by_index[index] if index < len(by_index) else {}
+        # Position is only trusted when that entry does not name a different real criterion
+        if str(positional.get("criterion", "")).strip().lower() in known:
+            positional = {}
+        item = given.get(criterion.strip().lower()) or positional
+        status = str(item.get("status", "UNKNOWN")).upper()
+        assessments.append(
+            {
+                "criterion": criterion,
+                "status": status if status in CRITERION_STATUSES else "UNKNOWN",
+                "evidence": str(item.get("evidence", "")) or "Not assessed by the reporter.",
+                "evidence_refs": [ref for ref in item.get("evidence_refs", []) if ref in evidence_refs],
+            }
+        )
+    goal = narrative.get("goal_assessment") or {}
+    goal_status = str(goal.get("status", "UNKNOWN")).upper()
+    return {
+        **narrative,
+        "criteria_assessment": assessments,
+        "goal_assessment": {
+            "status": goal_status if goal_status in GOAL_STATUSES else "UNKNOWN",
+            "summary": str(goal.get("summary", "")),
+        },
+        "recommendation_evidence": [
+            ref for ref in narrative.get("recommendation_evidence", []) if ref in evidence_refs
+        ],
+    }

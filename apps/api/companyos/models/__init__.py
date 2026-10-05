@@ -6,7 +6,7 @@ from companyos.models.identity import (
     User,
     UserSession,
 )
-from companyos.models.knowledge import CompanyMemory, Document, DocumentChunk
+from companyos.models.knowledge import CompanyMemory, Document, DocumentChunk, Evidence
 from companyos.models.organization import Agent, AgentPermission, AgentRelationship, AgentTool, Department
 from companyos.models.output import (
     AgentFeedback,
@@ -59,6 +59,7 @@ __all__ = [
     "Document",
     "DocumentChunk",
     "Escalation",
+    "Evidence",
     "InboxItem",
     "Integration",
     "IntegrationCredential",

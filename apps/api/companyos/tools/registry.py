@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from companyos.events import record_activity
-from companyos.models import Agent, AgentMessage, AgentRelationship, Artifact, Integration, Task
+from companyos.models import Agent, AgentMessage, AgentRelationship, Artifact, Evidence, Integration, Task
 from companyos.models.enums import ActorType, EscalationKind, MessageKind, RiskLevel, TaskStatus
 from companyos.providers.llm import LLMProvider
 from companyos.providers.web_search import WebSearchUnavailable, tavily_search
@@ -117,6 +117,19 @@ class ScheduleSocialPostArgs(BaseModel):
     publish_at: str = Field(max_length=40, description="ISO date/time for the scheduled draft")
 
 
+class EvidenceItemArgs(BaseModel):
+    kind: str = Field(pattern=r"^(sourced_fact|assumption|conclusion)$")
+    claim: str = Field(min_length=5, max_length=1000)
+    source_url: str | None = Field(default=None, max_length=1000, pattern=r"^https?://")
+    source_title: str | None = Field(default=None, max_length=300)
+    excerpt: str = Field(default="", max_length=1500)
+    confidence: str = Field(default="medium", pattern=r"^(low|medium|high)$")
+
+
+class RecordEvidenceArgs(BaseModel):
+    items: list[EvidenceItemArgs] = Field(min_length=1, max_length=10)
+
+
 class EscalationOptionArgs(BaseModel):
     label: str = Field(min_length=2, max_length=120)
     description: str = Field(default="", max_length=500)
@@ -165,6 +178,8 @@ async def search_company_knowledge(
         limit=args.limit,
         agent_id=ctx.agent_id,
     )
+    seen: set[str] = ctx.extra.setdefault("seen_sources", set())
+    seen.update(hit.document_title for hit in results.chunks)
     return ToolResult(content=knowledge_service.format_for_agent(results), data={"hits": len(results.chunks)})
 
 
@@ -333,6 +348,8 @@ async def web_search(ctx: ToolContext, session: AsyncSession, args: WebSearchArg
         raise ToolExecutionError(str(error)) from error
     except httpx.HTTPError as error:
         raise ToolExecutionError(f"Web search provider unreachable: {error.__class__.__name__}") from error
+    seen: set[str] = ctx.extra.setdefault("seen_sources", set())
+    seen.update(item.url for item in results)
     body = "\n\n".join(f"[{item.title}]({item.url})\n{item.snippet}" for item in results)
     return ToolResult(content=body or "No results.", data={"results": len(results)}, untrusted=True)
 
@@ -390,6 +407,35 @@ async def send_external_email(
         data={"to": args.to, "subject": args.subject},
     )
     return ToolResult(content="Email recorded in the sandbox; no external email integration is connected.")
+
+
+async def record_evidence(ctx: ToolContext, session: AsyncSession, args: RecordEvidenceArgs) -> ToolResult:
+    seen: set[str] = ctx.extra.setdefault("seen_sources", set())
+    refs = []
+    for item in args.items:
+        source = item.source_url or item.source_title
+        # A sourced fact must cite something this agent actually retrieved in this task
+        if item.kind == "sourced_fact" and (not source or source not in seen):
+            raise ToolExecutionError(
+                f"'{item.claim[:60]}' cites a source not retrieved in this task; record it as an assumption"
+            )
+        evidence = Evidence(
+            organization_id=ctx.organization_id,
+            objective_id=ctx.objective_id,
+            task_id=ctx.task_id,
+            agent_id=ctx.agent_id,
+            ref=f"E-{uuid.uuid4().hex[:6]}",
+            kind=item.kind,
+            claim=item.claim,
+            source_url=item.source_url,
+            source_title=item.source_title,
+            excerpt=item.excerpt,
+            confidence=item.confidence,
+        )
+        session.add(evidence)
+        refs.append(evidence.ref)
+    await session.flush()
+    return ToolResult(content=f"Recorded evidence {', '.join(refs)}.", data={"evidence_refs": refs})
 
 
 async def escalate_to_ceo(ctx: ToolContext, session: AsyncSession, args: EscalateArgs) -> ToolResult:
@@ -450,6 +496,14 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
             RiskLevel.AUTONOMOUS,
             DelegateTaskArgs,
             delegate_task,
+        ),
+        ToolDefinition(
+            "record_evidence",
+            "Record important claims with provenance: sourced_fact (only for sources you retrieved in this task), "
+            "assumption, or conclusion. Include confidence.",
+            RiskLevel.AUTONOMOUS,
+            RecordEvidenceArgs,
+            record_evidence,
         ),
         ToolDefinition(
             "escalate_to_ceo",

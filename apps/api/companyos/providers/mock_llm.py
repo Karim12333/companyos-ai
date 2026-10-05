@@ -154,6 +154,11 @@ def mock_plan(hints: dict[str, Any]) -> dict[str, Any]:
         for key, role, title, depends_on, output_type in steps
     ]
     return {
+        "objective_acceptance_criteria": [
+            "Market and competitor evidence supports a go/no-go decision",
+            "MVP scope and architecture are defined and estimated",
+            "Launch messaging and copy are ready for CEO review",
+        ],
         "summary": f"Plan for '{hints.get('objective_title', '')}': research first, then product definition, "
         "then engineering and marketing in parallel.",
         "tasks": tasks,
@@ -188,6 +193,20 @@ def mock_report(hints: dict[str, Any]) -> dict[str, Any]:
         "next_actions": (["Review pending approvals in the CEO Inbox"] if pending else [])
         + ["Configure an AI provider for production-quality output"],
         "risks": [f"Failed: {title}" for title in stats.get("failed_titles", [])],
+        "criteria_assessment": [
+            {
+                "criterion": item,
+                "status": "PASS" if failed == 0 else "PARTIAL",
+                "evidence": "Based on the delivered artifacts (offline mock assessment).",
+                "evidence_refs": [],
+            }
+            for item in stats.get("acceptance_criteria", [])
+        ],
+        "goal_assessment": {
+            "status": "ACHIEVED" if failed == 0 else "PARTIALLY_ACHIEVED",
+            "summary": "Assessed by the offline mock model; verify with a real AI provider.",
+        },
+        "recommendation_evidence": [],
     }
 
 
@@ -250,6 +269,25 @@ class MockLLMProvider:
                     "filename": title.lower().replace(" ", "-")[:60] + ".md",
                     "content": mock_document(hints),
                     "kind": str(hints.get("expected_output_type", "document")),
+                },
+            )
+        if "record_evidence" in available and "record_evidence" not in used:
+            # Offline mode has no retrieved sources, so nothing is recorded as a sourced fact
+            return call(
+                "record_evidence",
+                {
+                    "items": [
+                        {
+                            "kind": "assumption",
+                            "claim": f"Demand exists for {_subject(hints)}.",
+                            "confidence": "low",
+                        },
+                        {
+                            "kind": "conclusion",
+                            "claim": "An MVP is worth validating with 5 pilot customers.",
+                            "confidence": "medium",
+                        },
+                    ]
                 },
             )
         social_ready = hints.get("role_key") == "copywriter" and int(hints.get("revision", 0)) == 0

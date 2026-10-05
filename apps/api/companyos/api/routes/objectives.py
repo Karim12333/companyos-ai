@@ -24,6 +24,7 @@ from companyos.models import (
     Approval,
     Artifact,
     Escalation,
+    Evidence,
     Objective,
     Project,
     Task,
@@ -88,6 +89,7 @@ async def create_objective(body: ObjectiveCreate, org: Org, session: OrgSession)
         target_date=body.target_date,
         budget_usd=float(body.budget_usd) if body.budget_usd is not None else None,
         external_actions=body.external_actions,
+        acceptance_criteria=[item.strip()[:300] for item in body.success_criteria if item.strip()],
     )
     objective_id = objective.id
     await session.commit()
@@ -152,6 +154,11 @@ async def get_objective(objective_id: uuid.UUID, org: Org, session: OrgSession) 
             .limit(200)
         )
     ).all()
+    evidence = (
+        await session.scalars(
+            select(Evidence).where(Evidence.objective_id == objective.id).order_by(Evidence.created_at)
+        )
+    ).all()
     escalations = (
         await session.scalars(
             select(Escalation)
@@ -172,6 +179,22 @@ async def get_objective(objective_id: uuid.UUID, org: Org, session: OrgSession) 
         "messages": [MessageOut.model_validate(item).model_dump(mode="json") for item in messages],
         "approvals": [ApprovalOut.model_validate(item).model_dump(mode="json") for item in approvals],
         "artifacts": [ArtifactOut.model_validate(item).model_dump(mode="json") for item in artifacts],
+        "evidence": [
+            {
+                "id": item.id,
+                "ref": item.ref,
+                "kind": item.kind,
+                "claim": item.claim,
+                "source_url": item.source_url,
+                "source_title": item.source_title,
+                "excerpt": item.excerpt,
+                "confidence": item.confidence,
+                "task_id": item.task_id,
+                "agent_id": item.agent_id,
+                "collected_at": item.collected_at,
+            }
+            for item in evidence
+        ],
         "escalations": [EscalationOut.model_validate(item).model_dump(mode="json") for item in escalations],
         "activity": [ActivityOut.model_validate(item).model_dump(mode="json") for item in activity],
         "workflow_runs": [

@@ -63,6 +63,8 @@ class Objective(TenantMixin, Base):
     budget_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"))
     approval_policy: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Measurable definition of "goal achieved"; assessed criterion by criterion in the report
+    acceptance_criteria: Mapped[list] = mapped_column(JSONB, default=list)
     plan_summary: Mapped[str] = mapped_column(Text, default="")
     executive_summary: Mapped[dict | None] = mapped_column(JSONB)
     issues: Mapped[list] = mapped_column(JSONB, default=list)

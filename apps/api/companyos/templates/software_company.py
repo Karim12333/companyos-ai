@@ -61,7 +61,7 @@ SOFTWARE_COMPANY = OrganizationTemplate(
             ),
             goals=["Decision-grade research", "Explicit confidence and sources"],
             responsibilities=["Market sizing", "Competitor analysis", "Customer segments"],
-            tools=[*BASE_TOOLS, "web_search"],
+            tools=[*BASE_TOOLS, "web_search", "record_evidence"],
         ),
         AgentSpec(
             role_key="product_manager",

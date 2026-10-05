@@ -44,6 +44,7 @@ async def create_objective(
     target_date: datetime | None = None,
     budget_usd: float | None = None,
     external_actions: str | None = None,
+    acceptance_criteria: list[str] | None = None,
 ) -> Objective:
     coordinator = await session.scalar(
         select(Agent).where(
@@ -64,6 +65,7 @@ async def create_objective(
         target_date=target_date,
         budget_usd=budget_usd,
         approval_policy={"external_actions": external_actions or "require_approval"},
+        acceptance_criteria=acceptance_criteria or [],
     )
     session.add(objective)
     await session.flush()

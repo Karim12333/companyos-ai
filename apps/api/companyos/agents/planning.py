@@ -29,6 +29,7 @@ class PlannedTask(BaseModel):
 
 class Plan(BaseModel):
     summary: str = Field(max_length=2000)
+    objective_acceptance_criteria: list[str] = Field(default_factory=list, max_length=8)
     tasks: list[PlannedTask] = Field(min_length=1, max_length=MAX_PLAN_TASKS)
 
 
@@ -103,8 +104,11 @@ Rules:
 - Do not plan review or the final executive report — the platform does both automatically.
 - External actions (publishing, emailing) are allowed only as requests; the platform gates them.
 
+Also define 3-6 measurable objective_acceptance_criteria: what must be true for the CEO goal to be
+achieved (not just "tasks done"). Keep any success criteria the CEO gave in the context.
+
 Respond with JSON only:
-{{"summary": "...", "tasks": [{{"key": "snake_case_id", "title": "...", "role": "role_key",
+{{"summary": "...", "objective_acceptance_criteria": ["..."], "tasks": [{{"key": "snake_case_id", "title": "...", "role": "role_key",
 "instructions": "...", "depends_on": ["other_key"], "expected_output_type": "document",
 "acceptance_criteria": ["..."], "requires_review": true, "priority": "normal"}}]}}"""
 
