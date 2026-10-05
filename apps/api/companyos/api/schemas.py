@@ -272,6 +272,9 @@ class ApprovalOut(ORM):
     decision_note: str
     executed_at: datetime | None
     execution_result: dict[str, Any] | None
+    execution_status: str
+    execution_attempts: int
+    execution_error: str | None
     created_at: datetime
 
 

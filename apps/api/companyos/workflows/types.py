@@ -61,6 +61,12 @@ class EscalationOutcome:
 
 
 @dataclass
+class ApprovalResolution:
+    # Approvals whose outcome is unknown and now wait for CEO verification
+    escalation_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
 class TaskFailure:
     organization_id: str
     objective_id: str

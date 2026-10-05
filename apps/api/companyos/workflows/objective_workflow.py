@@ -9,6 +9,7 @@ from temporalio.exceptions import ActivityError
 with workflow.unsafe.imports_passed_through():
     from companyos.workflows.types import (
         ApprovalCheck,
+        ApprovalResolution,
         EscalationCheck,
         EscalationOutcome,
         EscalationRef,
@@ -153,11 +154,8 @@ class ObjectiveWorkflow:
                         return
                     if result.approval_ids:
                         await self._await_approvals(ref, result.approval_ids)
-                        if self._cancelled:
+                        if self._cancelled or not await self._resolve_approvals(ref):
                             return
-                        await workflow.execute_activity(
-                            "resolve_task_approvals", ref, start_to_close_timeout=SHORT, retry_policy=DB_RETRY
-                        )
                     if result.escalation_ids:
                         mode = await self._await_escalations(ref, result.escalation_ids)
                         continue
@@ -185,6 +183,26 @@ class ObjectiveWorkflow:
             await self._mark_failed(ref, f"Task exceeded {MAX_TASK_ROUNDS} execution rounds")
         except ActivityError as error:
             await self._mark_failed(ref, str(error.cause or error))
+
+    async def _resolve_approvals(self, ref: TaskRef) -> bool:
+        """Executes approved actions; returns False if the task must stop."""
+        while not self._cancelled:
+            resolution: ApprovalResolution = await workflow.execute_activity(
+                "resolve_task_approvals",
+                ref,
+                result_type=ApprovalResolution,
+                start_to_close_timeout=SHORT,
+                retry_policy=DB_RETRY,
+            )
+            if not resolution.escalation_ids:
+                return True
+            # Outcome unknown after a crash: the CEO verifies before anything is repeated
+            next_mode = await self._await_escalations(ref, resolution.escalation_ids)
+            if next_mode == "stop":
+                return False
+            if next_mode != "retry_action":
+                return True
+        return False
 
     async def _complete(self, ref: TaskRef) -> None:
         await workflow.execute_activity(
@@ -221,6 +239,7 @@ class ObjectiveWorkflow:
         if self._cancelled:
             return "stop"
         next_mode = "done"
+        priority = {"done": 0, "continue": 1, "execute": 2, "retry_action": 3}
         for escalation_id in escalation_ids:
             outcome: EscalationOutcome = await workflow.execute_activity(
                 "apply_escalation_resolution",
@@ -231,8 +250,9 @@ class ObjectiveWorkflow:
             )
             if outcome.action == "stopped":
                 return "stop"
-            if outcome.action == "rerun":
-                next_mode = "execute"
+            mode = "execute" if outcome.action == "rerun" else outcome.action
+            if priority.get(mode, 0) > priority[next_mode]:
+                next_mode = mode
         return next_mode
 
     async def _await_approvals(self, ref: TaskRef, approval_ids: list[str]) -> None:

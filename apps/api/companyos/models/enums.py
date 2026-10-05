@@ -180,3 +180,12 @@ class EscalationKind(StrEnum):
     CONFLICTING_EVIDENCE = "conflicting_evidence"
     AMBIGUOUS_SCOPE = "ambiguous_scope"
     ACTION_OUTCOME_UNKNOWN = "action_outcome_unknown"
+
+
+class ExecutionStatus(StrEnum):
+    NOT_STARTED = "NOT_STARTED"
+    EXECUTING = "EXECUTING"
+    EXECUTED = "EXECUTED"
+    FAILED = "FAILED"
+    # Started but the outcome was never recorded (crash); a human must verify before any retry
+    UNKNOWN = "UNKNOWN"

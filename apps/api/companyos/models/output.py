@@ -21,6 +21,7 @@ from companyos.models.enums import (
     ArtifactApprovalStatus,
     EscalationKind,
     EscalationStatus,
+    ExecutionStatus,
     FeedbackStatus,
     InboxCategory,
     NotificationStatus,
@@ -93,6 +94,16 @@ class Approval(TenantMixin, Base):
     decision_note: Mapped[str] = mapped_column(Text, default="")
     executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     execution_result: Mapped[dict | None] = mapped_column(JSONB)
+    execution_status: Mapped[ExecutionStatus] = mapped_column(
+        str_enum(ExecutionStatus), default=ExecutionStatus.NOT_STARTED
+    )
+    # One logical external action = one key; propagated to providers that support idempotency
+    idempotency_key: Mapped[str] = mapped_column(
+        String(80), unique=True, default=lambda: f"act_{uuid.uuid4().hex}"
+    )
+    execution_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    execution_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    execution_error: Mapped[str | None] = mapped_column(Text)
 
 
 class ApprovalPolicy(TenantMixin, Base):

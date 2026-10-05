@@ -9,12 +9,13 @@ from temporalio import activity
 
 from companyos.db import tenant_scope
 from companyos.events import record_activity
-from companyos.models import Escalation, Task
+from companyos.models import Approval, Escalation, Task
 from companyos.models.enums import (
     ActorType,
     ErrorCategory,
     EscalationKind,
     EscalationStatus,
+    ExecutionStatus,
     TaskStatus,
 )
 from companyos.services.objective_status import refresh_objective_status
@@ -40,12 +41,13 @@ def outcome_for(escalation: Escalation) -> str:
     if escalation.status == EscalationStatus.CANCELLED:
         return "stopped"
     option = escalation.resolution_option or ""
-    if option == "fail" or option == "abandon":
+    if escalation.kind == EscalationKind.ACTION_OUTCOME_UNKNOWN:
+        # The deliverable exists either way; only the external action is decided here
+        return "retry_action" if option == "retry" else "continue"
+    if option == "fail":
         return "stopped"
     if escalation.kind == EscalationKind.REVIEW_EXHAUSTED:
         return "done" if option == "accept" else "rerun"
-    if escalation.kind == EscalationKind.ACTION_OUTCOME_UNKNOWN:
-        return "retry_action" if option == "retry" else "done"
     return "rerun"
 
 
@@ -86,6 +88,19 @@ async def apply_escalation_resolution(ref: EscalationRef) -> EscalationOutcome:
             task.review_feedback = f"CEO guidance: {escalation.resolution_note}"
             task.status = TaskStatus.READY
         elif escalation.kind == EscalationKind.ACTION_OUTCOME_UNKNOWN:
+            approval = await session.get(Approval, escalation.approval_id) if escalation.approval_id else None
+            if approval is not None:
+                if escalation.resolution_option == "mark_executed":
+                    approval.execution_status = ExecutionStatus.EXECUTED
+                    approval.executed_at = datetime.now(UTC)
+                    approval.execution_result = {"status": "executed", "message": "Verified by the CEO"}
+                elif escalation.resolution_option == "retry":
+                    # The CEO verified it did not happen: exactly one more attempt is allowed
+                    approval.execution_status = ExecutionStatus.NOT_STARTED
+                    approval.execution_error = None
+                else:
+                    approval.execution_status = ExecutionStatus.FAILED
+                    approval.execution_error = "Abandoned by CEO decision"
             task.status = TaskStatus.RUNNING
         else:
             answer = escalation.resolution_note or str(decision.get("label", ""))

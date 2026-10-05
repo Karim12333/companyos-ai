@@ -38,6 +38,7 @@ async def create_approval(
     objective_id: uuid.UUID | None,
     task_id: uuid.UUID | None,
     artifact_id: uuid.UUID | None = None,
+    preapproved: bool = False,
 ) -> Approval:
     approval = Approval(
         organization_id=organization_id,
@@ -52,8 +53,26 @@ async def create_approval(
         summary=summary,
         payload=payload,
     )
+    if preapproved:
+        # Allowed by organization policy: no CEO decision, but still one tracked action record
+        approval.status = ApprovalStatus.APPROVED
+        approval.decided_at = datetime.now(UTC)
+        approval.decision_note = "Allowed by organization policy"
     session.add(approval)
     await session.flush()
+    if preapproved:
+        await record_activity(
+            session,
+            organization_id=organization_id,
+            event_type="approval.policy_allowed",
+            summary=f"{agent.name}: {title} (allowed by organization policy)",
+            objective_id=objective_id,
+            agent_id=agent.id,
+            task_id=task_id,
+            actor_type=ActorType.AGENT,
+            data={"approval_id": str(approval.id), "action": action_key},
+        )
+        return approval
     session.add(
         InboxItem(
             organization_id=organization_id,

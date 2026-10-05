@@ -58,6 +58,10 @@ class ToolDefinition:
     risk_level: RiskLevel
     args_model: type[BaseModel]
     handler: Handler
+    # External tools change the outside world: executed once, tracked, never blindly repeated
+    external: bool = False
+    # True only when the provider deduplicates by our idempotency key, making re-sends safe
+    provider_idempotent: bool = False
 
     def json_schema(self) -> dict[str, Any]:
         schema = self.args_model.model_json_schema()
@@ -468,6 +472,7 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
             RiskLevel.CONTROLLED,
             ScheduleSocialPostArgs,
             schedule_social_post,
+            external=True,
         ),
         ToolDefinition(
             "publish_social_post",
@@ -475,6 +480,7 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
             RiskLevel.HUMAN_APPROVAL,
             PublishSocialPostArgs,
             publish_social_post,
+            external=True,
         ),
         ToolDefinition(
             "send_external_email",
@@ -482,6 +488,7 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
             RiskLevel.HUMAN_APPROVAL,
             SendExternalEmailArgs,
             send_external_email,
+            external=True,
         ),
     ]
 }

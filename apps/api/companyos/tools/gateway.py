@@ -9,10 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from companyos.db import tenant_scope
 from companyos.events import record_audit
-from companyos.models import Agent, Approval, ApprovalPolicy, Objective
-from companyos.models.enums import ActorType, ApprovalStatus, RiskLevel
+from companyos.models import Agent, Approval, ApprovalPolicy, Objective, Task
+from companyos.models.enums import ActorType, ApprovalStatus, ExecutionStatus, RiskLevel
 from companyos.observability import logger
 from companyos.services.approvals import create_approval
+from companyos.services.integrations import resolve_ai
 from companyos.services.usage import budget_state
 from companyos.tools.policy import Decision, PolicyDecision, PolicyInput, evaluate
 from companyos.tools.registry import TOOL_REGISTRY, ToolContext, ToolDefinition, ToolExecutionError
@@ -138,37 +139,145 @@ async def invoke(ctx: ToolContext, tool_key: str, raw_arguments: dict[str, Any])
                 "do not retry it. Finish the rest of your task.",
                 approval_id=approval.id,
             )
-        return await _run_handler(session, ctx, tool, args)
+        if not tool.external:
+            return await _run_handler(session, ctx, tool, args)
+        # External actions allowed by policy still go through the tracked, at-most-once path
+        approval = await create_approval(
+            session,
+            organization_id=ctx.organization_id,
+            agent=agent,
+            action_key=tool_key,
+            tool_key=tool_key,
+            risk_level=tool.risk_level,
+            title=f"{agent.name}: {tool.description.split('.')[0]}",
+            summary=_approval_summary(tool_key, args.model_dump()),
+            payload={"arguments": args.model_dump(mode="json"), "reason": decision.reason},
+            objective_id=ctx.objective_id,
+            task_id=ctx.task_id,
+            preapproved=True,
+        )
+        approval_id = approval.id
+    return await execute_approved(ctx.organization_id, approval_id, ctx.task_id)
 
 
-async def execute_approved(ctx: ToolContext, approval_id: uuid.UUID) -> GatewayOutcome:
-    """Runs an action after the CEO approved it; non-approval checks are re-evaluated."""
-    async with tenant_scope(ctx.organization_id) as session:
+@dataclass(frozen=True)
+class _ApprovalContext:
+    context: ToolContext
+    tool: ToolDefinition
+    agent: Agent
+
+
+async def _approval_context(
+    session: AsyncSession, approval: Approval, expected_task_id: uuid.UUID | None
+) -> _ApprovalContext | str:
+    """Rebuilds the execution context from the approval record; returns a reason on any mismatch."""
+    tool = TOOL_REGISTRY.get(approval.tool_key or "")
+    if tool is None:
+        return "Tool no longer exists"
+    if expected_task_id is not None and approval.task_id != expected_task_id:
+        return "Approval belongs to a different task"
+    agent = await session.get(Agent, approval.agent_id) if approval.agent_id else None
+    if agent is None or agent.organization_id != approval.organization_id:
+        return "Approval agent does not belong to this organization"
+    task = await session.get(Task, approval.task_id) if approval.task_id else None
+    if approval.task_id and (
+        task is None
+        or task.organization_id != approval.organization_id
+        or task.objective_id != approval.objective_id
+        or task.assigned_agent_id != approval.agent_id
+    ):
+        return "Approval task, objective or agent do not match"
+    ai = await resolve_ai(session, approval.organization_id)
+    context = ToolContext(
+        organization_id=approval.organization_id,
+        agent_id=agent.id,
+        agent_role_key=agent.role_key,
+        objective_id=approval.objective_id,
+        task_id=approval.task_id,
+        task_run_id=None,
+        llm=ai.provider,
+        embedding_model=ai.embedding_model,
+        extra={"idempotency_key": approval.idempotency_key, "approval_id": str(approval.id)},
+    )
+    return _ApprovalContext(context=context, tool=tool, agent=agent)
+
+
+async def execute_approved(
+    organization_id: uuid.UUID, approval_id: uuid.UUID, expected_task_id: uuid.UUID | None = None
+) -> GatewayOutcome:
+    """Executes an approved action at most once.
+
+    Phase 1 commits EXECUTING before any side effect. Phase 2 runs the tool and commits EXECUTED.
+    If a crash happens between them, the next attempt sees EXECUTING and marks the action UNKNOWN
+    instead of repeating it (unless the provider deduplicates by idempotency key).
+    """
+    async with tenant_scope(organization_id) as session:
         approval = await session.scalar(
             select(Approval)
-            .where(Approval.id == approval_id, Approval.organization_id == ctx.organization_id)
+            .where(Approval.id == approval_id, Approval.organization_id == organization_id)
             .with_for_update()
         )
         if approval is None or approval.tool_key is None:
             return GatewayOutcome("denied", "Approval not found")
+        resolved = await _approval_context(session, approval, expected_task_id)
+        if isinstance(resolved, str):
+            await record_audit(
+                session,
+                action="approval.context_mismatch",
+                organization_id=organization_id,
+                actor_type=ActorType.SYSTEM,
+                target_type="approval",
+                target_id=approval.id,
+                outcome="denied",
+                details={
+                    "reason": resolved,
+                    "expected_task_id": str(expected_task_id) if expected_task_id else None,
+                },
+            )
+            logger.warning("approval_context_mismatch", approval_id=str(approval.id), reason=resolved)
+            return GatewayOutcome("denied", resolved)
+        ctx, tool = resolved.context, resolved.tool
         if approval.status != ApprovalStatus.APPROVED:
             return GatewayOutcome("denied", f"Approval is {approval.status.value}")
-        if approval.executed_at is not None:
+        if approval.execution_status == ExecutionStatus.EXECUTED:
             return GatewayOutcome("executed", "Already executed", data=approval.execution_result or {})
-        tool = TOOL_REGISTRY.get(approval.tool_key)
-        agent = await session.get(Agent, approval.agent_id) if approval.agent_id else None
-        if tool is None or agent is None:
-            return GatewayOutcome("denied", "Tool or agent no longer exists")
-        decision = evaluate(await _policy_input(session, ctx, agent, tool.key, tool))
+        if approval.execution_status == ExecutionStatus.FAILED:
+            return GatewayOutcome("error", approval.execution_error or "Execution failed")
+        if approval.execution_status == ExecutionStatus.UNKNOWN:
+            return GatewayOutcome("unknown", "Outcome unknown; waiting for CEO verification")
+        if approval.execution_status == ExecutionStatus.EXECUTING and not tool.provider_idempotent:
+            # A previous attempt may have reached the provider: never repeat blindly
+            approval.execution_status = ExecutionStatus.UNKNOWN
+            approval.execution_error = "Execution started but its outcome was never recorded"
+            await _audit(session, ctx, tool.key, "unknown", {"approval_id": str(approval.id)})
+            return GatewayOutcome("unknown", "Outcome unknown; waiting for CEO verification")
+        decision = evaluate(await _policy_input(session, ctx, resolved.agent, tool.key, tool))
         if decision.decision == Decision.DENY:
+            approval.execution_status = ExecutionStatus.FAILED
+            approval.execution_error = f"Denied at execution time: {decision.reason}"
             approval.execution_result = {"status": "denied", "reason": decision.reason}
             await _audit(
                 session, ctx, tool.key, "denied", {"reason": decision.reason, "approval_id": str(approval_id)}
             )
             return GatewayOutcome("denied", decision.reason)
-        args = tool.args_model.model_validate(approval.payload.get("arguments", {}))
+        approval.execution_status = ExecutionStatus.EXECUTING
+        approval.execution_attempts += 1
+        approval.execution_started_at = datetime.now(UTC)
+        arguments = dict(approval.payload.get("arguments", {}))
+
+    # Phase 2: the side effect, then the durable record of it
+    async with tenant_scope(organization_id) as session:
+        approval = await session.scalar(select(Approval).where(Approval.id == approval_id).with_for_update())
+        assert approval is not None
+        args = tool.args_model.model_validate(arguments)
         outcome = await _run_handler(session, ctx, tool, args)
-        approval.executed_at = datetime.now(UTC)
+        if outcome.status == "executed":
+            approval.execution_status = ExecutionStatus.EXECUTED
+            approval.executed_at = datetime.now(UTC)
+            approval.execution_error = None
+        else:
+            approval.execution_status = ExecutionStatus.FAILED
+            approval.execution_error = outcome.content[:2000]
         approval.execution_result = {"status": outcome.status, "message": outcome.content[:2000]}
         return outcome
 
