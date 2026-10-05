@@ -48,6 +48,12 @@ def model_for(agent: Agent | None, ai: ResolvedAI) -> str:
     return ai.premium_model if agent and agent.use_premium_model else ai.default_model
 
 
+def fallback_for(agent: Agent | None, ai: ResolvedAI) -> str | None:
+    # Only a different (default) model can stand in; the substitution is recorded by MeteredLLM
+    chosen = model_for(agent, ai)
+    return ai.default_model if chosen != ai.default_model else None
+
+
 async def agent_by_role(session: AsyncSession, organization_id: uuid.UUID, role_key: str) -> Agent | None:
     return await session.scalar(
         select(Agent).where(

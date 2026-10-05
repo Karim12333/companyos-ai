@@ -38,6 +38,7 @@ from companyos.services.usage import BudgetExceeded
 from companyos.workflows.activities.shared import (
     MAX_ATTEMPTS,
     fail_task,
+    fallback_for,
     finish_task,
     ids,
     model_for,
@@ -164,6 +165,7 @@ async def execute_task(ref: TaskRef) -> ExecuteResult:
             tool_keys=[tool.tool_key for tool in agent.tools if tool.enabled],
             llm=ai.provider,
             model=model_for(agent, ai),
+            fallback_model=fallback_for(agent, ai),
             embedding_model=ai.embedding_model,
             temperature=agent.temperature,
             max_iterations=min(agent.max_iterations, settings.max_task_iterations if settings else 8),

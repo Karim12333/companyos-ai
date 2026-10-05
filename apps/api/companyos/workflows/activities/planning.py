@@ -28,6 +28,7 @@ from companyos.services.integrations import resolve_ai
 from companyos.workflows.activities.shared import (
     NON_RETRYABLE,
     agent_by_role,
+    fallback_for,
     ids,
     model_for,
     preferences,
@@ -95,6 +96,7 @@ async def plan_objective(data: ObjectiveInput) -> int:
             roles=roles,
             llm=ai.provider,
             model=model_for(coordinator, ai),
+            fallback_model=fallback_for(coordinator, ai),
         )
     except PlanningError as error:
         raise ApplicationError(str(error), type=NON_RETRYABLE, non_retryable=True) from error

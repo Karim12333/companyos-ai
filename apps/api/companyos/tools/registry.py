@@ -3,6 +3,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -326,6 +327,8 @@ async def web_search(ctx: ToolContext, session: AsyncSession, args: WebSearchArg
         results = await tavily_search(secret, args.query)
     except WebSearchUnavailable as error:
         raise ToolExecutionError(str(error)) from error
+    except httpx.HTTPError as error:
+        raise ToolExecutionError(f"Web search provider unreachable: {error.__class__.__name__}") from error
     body = "\n\n".join(f"[{item.title}]({item.url})\n{item.snippet}" for item in results)
     return ToolResult(content=body or "No results.", data={"results": len(results)}, untrusted=True)
 

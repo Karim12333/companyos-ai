@@ -19,6 +19,7 @@ from companyos.config import get_settings
 from companyos.events import record_activity
 from companyos.models import AgentFeedback, CompanyMemory, Document, OrganizationPreference
 from companyos.models.enums import ActorType, FeedbackStatus, MemoryCategory
+from companyos.providers.llm import LLMError
 from companyos.rbac import Permission
 from companyos.services import knowledge as knowledge_service
 from companyos.services.integrations import resolve_ai
@@ -103,7 +104,14 @@ async def _store_document(
     session.add(document)
     await session.flush()
     ai = await resolve_ai(session, org.organization_id)
-    await knowledge_service.index_document(session, document, ai.provider, ai.embedding_model)
+    try:
+        await knowledge_service.index_document(session, document, ai.provider, ai.embedding_model)
+    except LLMError as error:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"Embedding provider failed, document not saved: {error}. "
+            "Retry later or set the embedding model to local-hash-1536 in Integrations.",
+        ) from error
     await record_activity(
         session,
         organization_id=org.organization_id,
@@ -166,6 +174,7 @@ async def search_knowledge(
         embedding_model=ai.embedding_model,
     )
     return {
+        "degraded": results.degraded,
         "facts": [MemoryOut.model_validate(item).model_dump(mode="json") for item in results.facts],
         "chunks": [
             {

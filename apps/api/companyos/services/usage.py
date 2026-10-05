@@ -50,16 +50,6 @@ async def budget_state(
     )
 
 
-async def ensure_within_budget(
-    session: AsyncSession, organization_id: uuid.UUID, objective_id: uuid.UUID | None
-) -> None:
-    state = await budget_state(session, organization_id, objective_id)
-    if state.objective_budget is not None and state.objective_cost >= state.objective_budget:
-        raise BudgetExceeded(f"Objective budget of ${state.objective_budget} exhausted")
-    if state.daily_budget is not None and state.daily_cost >= state.daily_budget:
-        raise BudgetExceeded(f"Daily AI budget of ${state.daily_budget} exhausted")
-
-
 async def record_usage(
     session: AsyncSession,
     *,
@@ -70,6 +60,7 @@ async def record_usage(
     task_id: uuid.UUID | None = None,
     task_run_id: uuid.UUID | None = None,
     agent_id: uuid.UUID | None = None,
+    fallback_from_model: str | None = None,
 ) -> Decimal:
     cost = estimate_cost(response.model, response.input_tokens, response.output_tokens)
     session.add(
@@ -86,6 +77,7 @@ async def record_usage(
             output_tokens=response.output_tokens,
             cost_usd=cost,
             latency_ms=response.latency_ms,
+            fallback_from_model=fallback_from_model,
         )
     )
     if objective_id:

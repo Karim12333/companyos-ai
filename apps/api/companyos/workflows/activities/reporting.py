@@ -6,6 +6,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 
+from companyos.agents.metered import MeteredLLM, MeteringScope
 from companyos.agents.prompts import agent_system_prompt
 from companyos.agents.reporting import write_report
 from companyos.db import tenant_scope
@@ -38,9 +39,10 @@ from companyos.services.escalations import cancel_open_escalations
 from companyos.services.integrations import resolve_ai
 from companyos.services.notifications import notify_objective_finished
 from companyos.services.reports import render_report_markdown
-from companyos.services.usage import BudgetExceeded, record_usage
+from companyos.services.usage import BudgetExceeded
 from companyos.workflows.activities.shared import (
     agent_by_role,
+    fallback_for,
     ids,
     model_for,
     now,
@@ -122,11 +124,21 @@ async def finalize_objective(data: FinalizeInput) -> str:
         )
         reporter_id = reporter.id if reporter else None
         reporter_model = model_for(reporter, ai)
+        reporter_fallback = fallback_for(reporter, ai)
 
     narrative_payload: dict[str, Any]
     try:
-        narrative, response = await write_report(
-            llm=ai.provider,
+        metered = MeteredLLM(
+            ai.provider,
+            MeteringScope(
+                organization_id=organization_id,
+                objective_id=objective_id,
+                agent_id=reporter_id,
+                fallback_model=reporter_fallback,
+            ),
+        )
+        narrative, _ = await write_report(
+            llm=metered,
             model=reporter_model,
             system_prompt=system_prompt,
             stats=stats,
@@ -134,7 +146,6 @@ async def finalize_objective(data: FinalizeInput) -> str:
         )
         narrative_payload = narrative.model_dump()
     except (LLMError, BudgetExceeded) as error:
-        response = None
         narrative_payload = {
             "headline": f"{stats['objective_title']} — {status.value}",
             "overall_assessment": f"Narrative unavailable ({error}). The facts below are authoritative.",
@@ -145,15 +156,6 @@ async def finalize_objective(data: FinalizeInput) -> str:
         }
 
     async with tenant_scope(organization_id) as session:
-        if response is not None:
-            await record_usage(
-                session,
-                organization_id=organization_id,
-                response=response,
-                purpose="report",
-                objective_id=objective_id,
-                agent_id=reporter_id,
-            )
         objective = await session.get(Objective, objective_id)
         assert objective is not None
         summary = {**stats, "narrative": narrative_payload}

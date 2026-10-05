@@ -3,6 +3,7 @@
 from sqlalchemy import select, update
 from temporalio import activity
 
+from companyos.agents.metered import MeteredLLM, MeteringScope
 from companyos.agents.prompts import agent_system_prompt
 from companyos.agents.review import review_deliverable
 from companyos.db import tenant_scope
@@ -25,9 +26,9 @@ from companyos.models.enums import (
 from companyos.services import artifacts as artifact_service
 from companyos.services.escalations import REVIEW_EXHAUSTED_OPTIONS, create_escalation
 from companyos.services.integrations import resolve_ai
-from companyos.services.usage import record_usage
 from companyos.workflows.activities.shared import (
     agent_by_role,
+    fallback_for,
     finish_task,
     ids,
     model_for,
@@ -73,9 +74,20 @@ async def review_task(ref: TaskRef) -> ReviewResult:
         )
         max_revisions = settings.max_review_revisions if settings else 2
         reviewer_model = model_for(reviewer, ai)
+        reviewer_fallback = fallback_for(reviewer, ai)
 
-    verdict, response = await review_deliverable(
-        llm=ai.provider,
+    metered = MeteredLLM(
+        ai.provider,
+        MeteringScope(
+            organization_id=organization_id,
+            objective_id=objective_id,
+            task_id=task_id,
+            agent_id=reviewer_id,
+            fallback_model=reviewer_fallback,
+        ),
+    )
+    verdict, _ = await review_deliverable(
+        llm=metered,
         model=reviewer_model,
         system_prompt=system_prompt,
         task_title=snapshot[0],
@@ -86,15 +98,6 @@ async def review_task(ref: TaskRef) -> ReviewResult:
     )
 
     async with tenant_scope(organization_id) as session:
-        await record_usage(
-            session,
-            organization_id=organization_id,
-            response=response,
-            purpose="review",
-            objective_id=objective_id,
-            task_id=task_id,
-            agent_id=reviewer_id,
-        )
         task = await session.get(Task, task_id)
         reviewer = await session.get(Agent, reviewer_id)
         author = await session.get(Agent, author_id) if author_id else None

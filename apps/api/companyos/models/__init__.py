@@ -19,7 +19,14 @@ from companyos.models.output import (
     Notification,
     OrganizationPreference,
 )
-from companyos.models.platform import AuditLog, Integration, IntegrationCredential, ModelUsage
+from companyos.models.platform import (
+    AuditLog,
+    BudgetLedger,
+    BudgetReservation,
+    Integration,
+    IntegrationCredential,
+    ModelUsage,
+)
 from companyos.models.work import (
     ActivityEvent,
     AgentMessage,
@@ -45,6 +52,8 @@ __all__ = [
     "ArtifactVersion",
     "AuditLog",
     "Base",
+    "BudgetLedger",
+    "BudgetReservation",
     "CompanyMemory",
     "Department",
     "Document",

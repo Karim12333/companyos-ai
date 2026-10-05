@@ -2,7 +2,19 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, LargeBinary, Numeric, String, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -56,6 +68,8 @@ class ModelUsage(TenantMixin, Base):
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"))
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    # Set when a weaker model replaced an unavailable one; never silent
+    fallback_from_model: Mapped[str | None] = mapped_column(String(120))
 
 
 class AuditLog(Base):
@@ -76,3 +90,41 @@ class AuditLog(Base):
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
     ip_address: Mapped[str | None] = mapped_column(String(64))
     correlation_id: Mapped[str | None] = mapped_column(String(64))
+
+
+class BudgetLedger(TenantMixin, Base):
+    """Running reserved/spent totals per budget scope; updated atomically with conditional UPDATEs."""
+
+    __tablename__ = "budget_ledgers"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "scope", "scope_key", name="uq_budget_ledger_scope"),
+        CheckConstraint("reserved_usd >= 0", name="reserved_non_negative"),
+        CheckConstraint("spent_usd >= 0", name="spent_non_negative"),
+        CheckConstraint("scope IN ('objective', 'daily')", name="valid_scope"),
+    )
+
+    scope: Mapped[str] = mapped_column(String(16))
+    scope_key: Mapped[str] = mapped_column(String(64))
+    limit_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6))
+    reserved_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"))
+    spent_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"))
+
+
+class BudgetReservation(TenantMixin, Base):
+    __tablename__ = "budget_reservations"
+    __table_args__ = (
+        Index("ix_budget_reservations_open", "organization_id", "status", "created_at"),
+        CheckConstraint("amount_usd >= 0", name="amount_non_negative"),
+        CheckConstraint("status IN ('reserved', 'settled', 'released', 'expired')", name="valid_status"),
+    )
+
+    objective_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("objectives.id", ondelete="SET NULL"))
+    task_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"))
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agents.id", ondelete="SET NULL"))
+    daily_key: Mapped[str] = mapped_column(String(16))
+    purpose: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(120))
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6))
+    actual_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    status: Mapped[str] = mapped_column(String(16), default="reserved")
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

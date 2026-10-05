@@ -195,6 +195,7 @@ class MockLLMProvider:
         json_mode: bool = False,
         purpose: str = "general",
         hints: dict[str, Any] | None = None,
+        max_output_tokens: int = 4096,
     ) -> LLMResponse:
         hints = hints or {}
         content: str | None = None

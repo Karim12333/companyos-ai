@@ -5,7 +5,8 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from companyos.models import CompanyMemory, Document, DocumentChunk, OrganizationPreference
-from companyos.providers.llm import LLMProvider, approximate_tokens
+from companyos.observability import logger
+from companyos.providers.llm import LLMError, LLMProvider, approximate_tokens
 
 CHUNK_CHARS = 1200
 CHUNK_OVERLAP = 150
@@ -24,6 +25,7 @@ class KnowledgeResults:
     facts: list[CompanyMemory] = field(default_factory=list)
     preferences: list[OrganizationPreference] = field(default_factory=list)
     chunks: list[ChunkHit] = field(default_factory=list)
+    degraded: str | None = None
 
 
 def split_text(text: str) -> list[str]:
@@ -99,7 +101,16 @@ async def search(
             )
         )
     ).all()
-    vectors, _ = await llm.embed([query], embedding_model)
+    try:
+        vectors, _ = await llm.embed([query], embedding_model)
+    except LLMError as error:
+        # Degrade to structured knowledge only, and say so; never crash the agent run
+        logger.warning("embedding_unavailable", organization_id=str(organization_id), error=str(error))
+        return KnowledgeResults(
+            facts=list(facts),
+            preferences=list(preferences),
+            degraded=f"Document search unavailable: {error}",
+        )
     distance = DocumentChunk.embedding.cosine_distance(vectors[0]).label("distance")
     rows = (
         await session.execute(
@@ -121,7 +132,11 @@ async def search(
 
 
 def format_for_agent(results: KnowledgeResults) -> str:
-    parts = []
+    parts = (
+        [f"NOTE: {results.degraded}. Only company facts and preferences are shown."]
+        if results.degraded
+        else []
+    )
     if results.facts:
         parts.append(
             "Company facts:\n" + "\n".join(f"- [{f.category}] {f.title}: {f.content}" for f in results.facts)

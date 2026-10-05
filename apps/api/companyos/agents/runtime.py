@@ -4,9 +4,9 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from companyos.db import tenant_scope
+from companyos.agents.metered import MeteredLLM, MeteringScope
+from companyos.observability import logger
 from companyos.providers.llm import LLMMessage, LLMProvider, ToolSpec
-from companyos.services.usage import ensure_within_budget, record_usage
 from companyos.tools import gateway
 from companyos.tools.registry import TOOL_REGISTRY, ToolContext
 
@@ -29,6 +29,12 @@ class AgentRunInput:
     max_iterations: int
     max_messages_per_task: int = 6
     hints: dict[str, Any] = field(default_factory=dict)
+    fallback_model: str | None = None
+
+
+# A tool that keeps failing is withdrawn for the rest of the run instead of burning iterations
+MAX_TOOL_FAILURES = 3
+FAILED_TOOL_STATUSES = {"error", "invalid", "denied"}
 
 
 @dataclass
@@ -65,6 +71,18 @@ def tool_specs(tool_keys: list[str]) -> list[ToolSpec]:
 
 def build_agent_graph(run: AgentRunInput) -> Any:
     specs = tool_specs(run.tool_keys)
+    llm = MeteredLLM(
+        run.llm,
+        MeteringScope(
+            organization_id=run.organization_id,
+            objective_id=run.objective_id,
+            task_id=run.task_id,
+            task_run_id=run.task_run_id,
+            agent_id=run.agent_id,
+            fallback_model=run.fallback_model,
+        ),
+    )
+    tool_failures: dict[str, int] = {}
     context = ToolContext(
         organization_id=run.organization_id,
         agent_id=run.agent_id,
@@ -78,27 +96,15 @@ def build_agent_graph(run: AgentRunInput) -> Any:
     )
 
     async def think(state: AgentState) -> dict[str, Any]:
-        async with tenant_scope(run.organization_id) as session:
-            await ensure_within_budget(session, run.organization_id, run.objective_id)
-        response = await run.llm.complete(
+        available = [spec for spec in specs if tool_failures.get(spec.name, 0) < MAX_TOOL_FAILURES]
+        response = await llm.complete(
             model=run.model,
             messages=state["messages"],
-            tools=specs,
+            tools=available,
             temperature=run.temperature,
             purpose="execute",
             hints=run.hints,
         )
-        async with tenant_scope(run.organization_id) as session:
-            await record_usage(
-                session,
-                organization_id=run.organization_id,
-                response=response,
-                purpose="execute",
-                objective_id=run.objective_id,
-                task_id=run.task_id,
-                task_run_id=run.task_run_id,
-                agent_id=run.agent_id,
-            )
         message = LLMMessage(role="assistant", content=response.content, tool_calls=response.tool_calls)
         trace_entry = {
             "step": "think",
@@ -122,18 +128,34 @@ def build_agent_graph(run: AgentRunInput) -> Any:
         approvals = list(state["approval_ids"])
         artifacts = list(state["artifact_ids"])
         escalations = list(state["escalation_ids"])
+        withdrawn: list[str] = []
         for call in last.tool_calls:
             outcome = await gateway.invoke(context, call.name, call.arguments)
             messages.append(
                 LLMMessage(role="tool", content=outcome.content, tool_call_id=call.id, name=call.name)
             )
             trace.append({"step": "tool", "tool": call.name, "status": outcome.status})
+            if outcome.status in FAILED_TOOL_STATUSES:
+                tool_failures[call.name] = tool_failures.get(call.name, 0) + 1
+                if tool_failures[call.name] == MAX_TOOL_FAILURES:
+                    logger.warning("tool_withdrawn", tool=call.name, task_id=str(run.task_id))
+                    trace.append({"step": "tool_withdrawn", "tool": call.name})
+                    withdrawn.append(call.name)
             if outcome.approval_id:
                 approvals.append(str(outcome.approval_id))
             if "artifact_id" in outcome.data:
                 artifacts.append(str(outcome.data["artifact_id"]))
             if "escalation_id" in outcome.data:
                 escalations.append(str(outcome.data["escalation_id"]))
+        for name in withdrawn:
+            # Appended after all tool results so the conversation stays valid for the provider
+            messages.append(
+                LLMMessage(
+                    role="user",
+                    content=f"The tool '{name}' failed {MAX_TOOL_FAILURES} times and is no longer available. "
+                    "Finish the task without it and state the limitation in your output.",
+                )
+            )
         update: dict[str, Any] = {
             "messages": messages,
             "trace": trace,

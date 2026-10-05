@@ -65,10 +65,21 @@ class LLMResponse:
     latency_ms: int = 0
 
 
+# Error kinds drive intentional fallbacks instead of accidental exception paths
+MODEL_UNAVAILABLE = "model_unavailable"
+RATE_LIMITED = "rate_limited"
+TRANSIENT = "transient"
+AUTH = "auth"
+INVALID_REQUEST = "invalid_request"
+DEFAULT_MAX_OUTPUT_TOKENS = 4096
+REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
+
 class LLMError(Exception):
-    def __init__(self, message: str, recoverable: bool) -> None:
+    def __init__(self, message: str, recoverable: bool, kind: str = INVALID_REQUEST) -> None:
         super().__init__(message)
         self.recoverable = recoverable
+        self.kind = kind
 
 
 class LLMProvider(Protocol):
@@ -85,6 +96,7 @@ class LLMProvider(Protocol):
         json_mode: bool = False,
         purpose: str = "general",
         hints: dict[str, Any] | None = None,
+        max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     ) -> LLMResponse: ...
 
     async def embed(self, texts: list[str], model: str) -> tuple[list[list[float]], int]: ...
@@ -123,12 +135,17 @@ class OpenAICompatibleProvider:
         json_mode: bool = False,
         purpose: str = "general",
         hints: dict[str, Any] | None = None,
+        max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     ) -> LLMResponse:
         request: dict[str, Any] = {
             "model": model,
             "messages": [_to_openai_message(message) for message in messages],
-            "temperature": temperature,
+            # Hard output cap: bounds cost and makes budget reservations an upper bound
+            "max_completion_tokens": max_output_tokens,
         }
+        if not model.startswith(REASONING_MODEL_PREFIXES):
+            # Reasoning models only accept their default temperature
+            request["temperature"] = temperature
         if tools:
             request["tools"] = [
                 {
@@ -142,11 +159,8 @@ class OpenAICompatibleProvider:
         started = time.monotonic()
         try:
             response = await self._client.chat.completions.create(**request)
-        except (RateLimitError, APITimeoutError, APIConnectionError) as error:
-            raise LLMError(f"AI provider temporarily unavailable: {error}", recoverable=True) from error
-        except APIStatusError as error:
-            recoverable = error.status_code >= 500
-            raise LLMError(f"AI provider error {error.status_code}: {error.message}", recoverable) from error
+        except Exception as error:
+            raise classify_error(error) from error
         choice = response.choices[0].message
         tool_calls = []
         for call in choice.tool_calls or []:
@@ -174,13 +188,31 @@ class OpenAICompatibleProvider:
             return local_embeddings(texts), 0
         try:
             response = await self._client.embeddings.create(model=model, input=texts, dimensions=1536)
-        except APIStatusError as error:
-            raise LLMError(
-                f"Embedding error {error.status_code}: {error.message}", error.status_code >= 500
-            ) from error
+        except Exception as error:
+            raise classify_error(error) from error
         return [
             item.embedding for item in response.data
         ], response.usage.prompt_tokens if response.usage else 0
+
+
+def classify_error(error: Exception) -> LLMError:
+    if isinstance(error, RateLimitError):
+        return LLMError(f"AI provider rate limit: {error}", recoverable=True, kind=RATE_LIMITED)
+    if isinstance(error, APITimeoutError | APIConnectionError):
+        return LLMError(f"AI provider temporarily unavailable: {error}", recoverable=True, kind=TRANSIENT)
+    if isinstance(error, APIStatusError):
+        message = f"AI provider error {error.status_code}: {error.message}"
+        code = str(getattr(error, "code", "") or "")
+        if error.status_code == 404 or code == "model_not_found":
+            return LLMError(message, recoverable=False, kind=MODEL_UNAVAILABLE)
+        if error.status_code in (401, 403):
+            return LLMError(message, recoverable=False, kind=AUTH)
+        return LLMError(
+            message,
+            recoverable=error.status_code >= 500,
+            kind=TRANSIENT if error.status_code >= 500 else INVALID_REQUEST,
+        )
+    return LLMError(f"AI provider call failed: {error!r}", recoverable=True, kind=TRANSIENT)
 
 
 def local_embeddings(texts: list[str]) -> list[list[float]]:

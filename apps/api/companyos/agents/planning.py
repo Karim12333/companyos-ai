@@ -6,10 +6,9 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field, ValidationError
 
-from companyos.db import tenant_scope
+from companyos.agents.metered import MeteredLLM, MeteringScope
 from companyos.models.enums import Priority
 from companyos.providers.llm import LLMMessage, LLMProvider
-from companyos.services.usage import record_usage
 
 MAX_PLAN_TASKS = 15
 MAX_PLAN_ATTEMPTS = 3
@@ -129,8 +128,18 @@ async def create_plan(
     roles: list[RoleOption],
     llm: LLMProvider,
     model: str,
+    fallback_model: str | None = None,
 ) -> Plan:
     available = {role.role_key for role in roles}
+    metered = MeteredLLM(
+        llm,
+        MeteringScope(
+            organization_id=organization_id,
+            objective_id=objective_id,
+            agent_id=coordinator_agent_id,
+            fallback_model=fallback_model,
+        ),
+    )
     hints: dict[str, Any] = {
         "objective_title": objective_title,
         "instruction": instruction,
@@ -138,7 +147,7 @@ async def create_plan(
     }
 
     async def draft(state: PlanState) -> dict[str, Any]:
-        response = await llm.complete(
+        response = await metered.complete(
             model=model,
             messages=state["messages"],
             json_mode=True,
@@ -146,15 +155,6 @@ async def create_plan(
             hints=hints,
             temperature=0.2,
         )
-        async with tenant_scope(organization_id) as session:
-            await record_usage(
-                session,
-                organization_id=organization_id,
-                response=response,
-                purpose="plan",
-                objective_id=objective_id,
-                agent_id=coordinator_agent_id,
-            )
         messages = [*state["messages"], LLMMessage(role="assistant", content=response.content)]
         try:
             plan = Plan.model_validate(json.loads(response.content or "{}"))
