@@ -24,16 +24,19 @@ class SendResult:
 
 class EmailProvider(Protocol):
     name: str
+    # True when the provider deduplicates by idempotency key, so a re-send after a crash is safe
+    supports_idempotency: bool
 
-    async def send(self, email: OutgoingEmail) -> SendResult: ...
+    async def send(self, email: OutgoingEmail, idempotency_key: str | None = None) -> SendResult: ...
 
 
 class SmtpEmailProvider:
     """Local development: delivers to Mailpit (http://localhost:8025)."""
 
     name = "smtp"
+    supports_idempotency = False
 
-    async def send(self, email: OutgoingEmail) -> SendResult:
+    async def send(self, email: OutgoingEmail, idempotency_key: str | None = None) -> SendResult:
         settings = get_settings()
         message = EmailMessage()
         message["From"] = settings.email_from
@@ -47,13 +50,17 @@ class SmtpEmailProvider:
 
 class ResendEmailProvider:
     name = "resend"
+    supports_idempotency = True
 
-    async def send(self, email: OutgoingEmail) -> SendResult:
+    async def send(self, email: OutgoingEmail, idempotency_key: str | None = None) -> SendResult:
         settings = get_settings()
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.post(
                 "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {settings.resend_api_key.get_secret_value()}"},
+                headers={
+                    "Authorization": f"Bearer {settings.resend_api_key.get_secret_value()}",
+                    **({"Idempotency-Key": idempotency_key[:256]} if idempotency_key else {}),
+                },
                 json={
                     "from": settings.email_from,
                     "to": [email.to],
@@ -71,11 +78,18 @@ class RecordingEmailProvider:
 
     name = "recording"
 
-    def __init__(self) -> None:
+    def __init__(self, supports_idempotency: bool = False) -> None:
         self.sent: list[OutgoingEmail] = []
+        self.keys: list[str | None] = []
+        self.supports_idempotency = supports_idempotency
+        self.fail_next = 0
 
-    async def send(self, email: OutgoingEmail) -> SendResult:
+    async def send(self, email: OutgoingEmail, idempotency_key: str | None = None) -> SendResult:
+        if self.fail_next:
+            self.fail_next -= 1
+            raise ConnectionError("simulated provider outage")
         self.sent.append(email)
+        self.keys.append(idempotency_key)
         return SendResult(provider=self.name, message_id=f"test-{len(self.sent)}")
 
 

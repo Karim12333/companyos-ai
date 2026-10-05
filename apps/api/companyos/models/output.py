@@ -11,6 +11,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -136,7 +137,10 @@ class InboxItem(TenantMixin, Base):
 
 
 class Notification(TenantMixin, Base):
+    """Transactional outbox row: written with the business change, delivered by the dispatcher."""
+
     __tablename__ = "notifications"
+    __table_args__ = (Index("ix_notifications_due", "status", "next_attempt_at"),)
 
     user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     objective_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("objectives.id", ondelete="SET NULL"))
@@ -151,7 +155,13 @@ class Notification(TenantMixin, Base):
     provider_message_id: Mapped[str | None] = mapped_column(String(200))
     error: Mapped[str | None] = mapped_column(Text)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    dedupe_key: Mapped[str | None] = mapped_column(String(200), unique=True)
+    # One logical notification per key, enforced by the database
+    dedupe_key: Mapped[str] = mapped_column(String(200), unique=True)
+    html_body: Mapped[str] = mapped_column(Text, default="")
+    text_body: Mapped[str] = mapped_column(Text, default="")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AgentFeedback(TenantMixin, Base):

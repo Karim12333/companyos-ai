@@ -15,6 +15,7 @@ from companyos.models.enums import (
     Severity,
     TaskStatus,
 )
+from companyos.services.notifications import notify_decision_required
 from companyos.services.objective_status import refresh_objective_status
 
 # Every escalation can be answered with guidance or stopped; these are always offered
@@ -150,6 +151,7 @@ async def create_escalation(
         details={"kind": kind.value, "task_id": str(task.id)},
     )
     queue_realtime(session, task.organization_id, "escalation", {"escalation_id": str(escalation.id)})
+    await notify_decision_required(session, task.organization_id, escalation)
     await refresh_objective_status(session, task.objective_id)
     return escalation
 

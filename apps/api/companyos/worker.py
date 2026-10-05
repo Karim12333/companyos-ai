@@ -5,6 +5,7 @@ from temporalio.worker import Worker
 from companyos.config import get_settings
 from companyos.observability import configure_logging, logger
 from companyos.providers.storage import get_storage
+from companyos.services.notification_dispatcher import run_dispatcher
 from companyos.workflows.activities import ALL_ACTIVITIES
 from companyos.workflows.client import get_temporal_client
 from companyos.workflows.objective_workflow import ObjectiveWorkflow
@@ -28,7 +29,14 @@ async def main() -> None:
     logger.info(
         "worker_starting", task_queue=settings.temporal_task_queue, temporal=settings.temporal_address
     )
-    await build_worker(client, settings.temporal_task_queue).run()
+    stop = asyncio.Event()
+    # The outbox dispatcher runs beside the Temporal worker; both stop together
+    dispatcher = asyncio.create_task(run_dispatcher(stop))
+    try:
+        await build_worker(client, settings.temporal_task_queue).run()
+    finally:
+        stop.set()
+        await dispatcher
 
 
 if __name__ == "__main__":

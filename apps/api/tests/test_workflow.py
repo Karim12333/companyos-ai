@@ -8,6 +8,7 @@ from temporalio.client import Client
 from companyos.providers.email import RecordingEmailProvider
 from companyos.providers.mock_llm import MockLLMProvider
 from companyos.services.integrations import set_llm_override
+from companyos.services.notification_dispatcher import dispatch_due
 from companyos.tools import gateway
 from companyos.tools.registry import ToolContext
 from tests.conftest import Tenant
@@ -72,6 +73,9 @@ async def test_objective_full_lifecycle(
     content = await tenant.client.get(tenant.url(f"/artifacts/{report_id}/content"))
     assert "Executive Report" in content.text
     assert content.headers["content-type"].startswith("text/plain")
+    # Emails are delivered by the outbox dispatcher, not inline
+    while await dispatch_due():
+        pass
     assert any(n.to == tenant.email and "Objective completed" in n.subject for n in mailbox.sent)
     assert any(n.subject.startswith("CompanyOS — Approval required") for n in mailbox.sent)
     hq = (await tenant.client.get(tenant.url("/headquarters"))).json()

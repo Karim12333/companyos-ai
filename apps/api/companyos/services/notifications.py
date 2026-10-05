@@ -1,16 +1,15 @@
 import uuid
-from datetime import UTC, datetime
 from typing import Any
 
 from jinja2 import Environment, select_autoescape
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from companyos.config import get_settings
 from companyos.models import Approval, Notification, Objective, Organization, OrganizationSettings
 from companyos.models.enums import NotificationStatus, ObjectiveStatus
 from companyos.observability import logger
-from companyos.providers.email import OutgoingEmail, get_email_provider
 
 _env = Environment(autoescape=select_autoescape(default=True, default_for_string=True))
 
@@ -49,7 +48,7 @@ async def _recipients(session: AsyncSession, organization_id: uuid.UUID) -> tupl
     return emails, ceo_name, organization.slug if organization else ""
 
 
-async def send_notification(
+async def enqueue_notification(
     session: AsyncSession,
     *,
     organization_id: uuid.UUID,
@@ -59,40 +58,31 @@ async def send_notification(
     subject: str,
     context: dict[str, Any],
     objective_id: uuid.UUID | None = None,
-) -> Notification:
-    key = f"{dedupe_key}:{recipient}"
-    existing = await session.scalar(select(Notification).where(Notification.dedupe_key == key))
-    if existing and existing.status == NotificationStatus.SENT:
-        return existing
-    notification = existing or Notification(
-        organization_id=organization_id,
-        objective_id=objective_id,
-        kind=kind,
-        recipient=recipient,
-        subject=subject,
-        dedupe_key=key,
-    )
-    session.add(notification)
-    provider = get_email_provider()
-    try:
-        result = await provider.send(
-            OutgoingEmail(
-                to=recipient, subject=subject, html=LAYOUT.render(**context), text=_text_version(context)
-            )
+) -> bool:
+    """Writes the delivery intent in the caller's transaction; the DB unique key makes it idempotent."""
+    result = await session.execute(
+        insert(Notification)
+        .values(
+            id=uuid.uuid4(),
+            organization_id=organization_id,
+            objective_id=objective_id,
+            channel="email",
+            kind=kind,
+            recipient=recipient,
+            subject=subject,
+            status=NotificationStatus.PENDING.value,
+            dedupe_key=f"{dedupe_key}:{recipient}",
+            html_body=LAYOUT.render(**context),
+            text_body=_text_version(context),
+            attempts=0,
         )
-        notification.status = NotificationStatus.SENT
-        notification.provider = result.provider
-        notification.provider_message_id = result.message_id
-        notification.sent_at = datetime.now(UTC)
-        notification.error = None
-    except Exception as error:
-        # A failed email must not fail the objective; it is recorded and visible in the admin view
-        notification.status = NotificationStatus.FAILED
-        notification.provider = provider.name
-        notification.error = str(error)[:1000]
-        logger.warning("email_send_failed", kind=kind, error=str(error))
-    await session.flush()
-    return notification
+        .on_conflict_do_nothing(index_elements=["dedupe_key"])
+        .returning(Notification.id)
+    )
+    created = result.scalar() is not None
+    if created:
+        logger.info("notification_enqueued", kind=kind, organization_id=str(organization_id))
+    return created
 
 
 async def notify_objective_finished(
@@ -132,7 +122,7 @@ async def notify_objective_finished(
         "link": f"{get_settings().web_base_url}/{slug}/objectives/{objective.id}?tab=report",
     }
     for email in emails:
-        await send_notification(
+        await enqueue_notification(
             session,
             organization_id=organization_id,
             kind=f"objective_{status.value.lower()}",
@@ -164,7 +154,7 @@ async def notify_approval_required(
         "link": f"{get_settings().web_base_url}/{slug}/approvals/{approval.id}",
     }
     for email in emails:
-        await send_notification(
+        await enqueue_notification(
             session,
             organization_id=organization_id,
             kind="approval_required",
@@ -173,4 +163,33 @@ async def notify_approval_required(
             subject=f"CompanyOS — Approval required: {approval.title}",
             context=context,
             objective_id=approval.objective_id,
+        )
+
+
+async def notify_decision_required(
+    session: AsyncSession, organization_id: uuid.UUID, escalation: Any
+) -> None:
+    emails, ceo_name, slug = await _recipients(session, organization_id)
+    organization = await session.get(Organization, organization_id)
+    context = {
+        "organization": organization.name if organization else "",
+        "eyebrow": "Decision required",
+        "accent": "#3451d1",
+        "title": escalation.question[:200],
+        "greeting": f"Hello {ceo_name}, your team needs a decision before it can continue this work.",
+        "rows": [("Type", escalation.kind.value.replace("_", " ").capitalize())],
+        "body": escalation.context[:800],
+        "cta": "Decide in CompanyOS",
+        "link": f"{get_settings().web_base_url}/{slug}/escalations/{escalation.id}",
+    }
+    for email in emails:
+        await enqueue_notification(
+            session,
+            organization_id=organization_id,
+            kind="decision_required",
+            dedupe_key=f"escalation:{escalation.id}",
+            recipient=email,
+            subject=f"CompanyOS — Decision required: {escalation.question[:80]}",
+            context=context,
+            objective_id=escalation.objective_id,
         )

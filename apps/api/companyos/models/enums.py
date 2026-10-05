@@ -141,6 +141,7 @@ class ActorType(StrEnum):
 
 class NotificationStatus(StrEnum):
     PENDING = "pending"
+    SENDING = "sending"
     SENT = "sent"
     FAILED = "failed"
 

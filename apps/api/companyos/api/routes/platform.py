@@ -1,7 +1,8 @@
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select, text
 
 from companyos.api.deps import AuthContext, SystemSession, require_platform_admin
@@ -19,6 +20,7 @@ from companyos.models import (
     WorkflowRun,
 )
 from companyos.models.enums import NotificationStatus, ObjectiveStatus, TaskStatus
+from companyos.services.notification_dispatcher import retry_notification
 from companyos.workflows.client import get_temporal_client
 
 router = APIRouter(prefix="/platform", tags=["platform"])
@@ -160,3 +162,47 @@ async def overview(admin: PlatformAdmin, session: SystemSession) -> dict[str, An
             for a in audit
         ],
     }
+
+
+@router.get("/notifications")
+async def notifications(
+    admin: PlatformAdmin, session: SystemSession, status_filter: str | None = None
+) -> dict[str, Any]:
+    counts = dict(
+        (
+            await session.execute(
+                select(Notification.status, func.count(Notification.id)).group_by(Notification.status)
+            )
+        ).all()
+    )
+    query = select(Notification).order_by(Notification.created_at.desc()).limit(100)
+    if status_filter:
+        query = query.where(Notification.status == status_filter)
+    rows = (await session.scalars(query)).all()
+    return {
+        "counts": {key.value: value for key, value in counts.items()},
+        "items": [
+            {
+                "id": row.id,
+                "organization_id": row.organization_id,
+                "kind": row.kind,
+                "recipient": row.recipient,
+                "subject": row.subject,
+                "status": row.status.value,
+                "attempts": row.attempts,
+                "error": row.error,
+                "provider": row.provider,
+                "next_attempt_at": row.next_attempt_at,
+                "sent_at": row.sent_at,
+                "created_at": row.created_at,
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.post("/notifications/{notification_id}/retry")
+async def retry(notification_id: uuid.UUID, admin: PlatformAdmin) -> dict[str, bool]:
+    if not await retry_notification(notification_id):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only failed notifications can be retried")
+    return {"queued": True}
