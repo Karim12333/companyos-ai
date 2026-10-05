@@ -1,0 +1,197 @@
+import asyncio
+from datetime import timedelta
+from typing import Any
+
+from temporalio import workflow
+from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
+
+with workflow.unsafe.imports_passed_through():
+    from companyos.workflows.types import (
+        ApprovalCheck,
+        ExecuteResult,
+        FinalizeInput,
+        ObjectiveInput,
+        ReadySnapshot,
+        ReviewResult,
+        TaskFailure,
+        TaskRef,
+    )
+
+SHORT = timedelta(minutes=2)
+AGENT_RUN = timedelta(minutes=20)
+APPROVAL_POLL = timedelta(minutes=10)
+DB_RETRY = RetryPolicy(maximum_attempts=5, initial_interval=timedelta(seconds=2))
+AGENT_RETRY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=5),
+    backoff_coefficient=3,
+    non_retryable_error_types=["NonRetryableTaskError"],
+)
+
+
+@workflow.defn(name="ObjectiveWorkflow")
+class ObjectiveWorkflow:
+    """Durable objective lifecycle: plan → run DAG in parallel → review → approvals → report → notify."""
+
+    def __init__(self) -> None:
+        self._paused = False
+        self._cancelled = False
+        self._wake = False
+        self._decided: set[str] = set()
+        self._running: dict[str, asyncio.Task[None]] = {}
+        self._stage = "starting"
+
+    @workflow.signal
+    def approval_decided(self, approval_id: str) -> None:
+        self._decided.add(approval_id)
+
+    @workflow.signal
+    def pause(self) -> None:
+        self._paused = True
+
+    @workflow.signal
+    def resume(self) -> None:
+        self._paused = False
+        self._wake = True
+
+    @workflow.signal
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    @workflow.signal
+    def wake(self) -> None:
+        self._wake = True
+
+    @workflow.query
+    def state(self) -> dict[str, Any]:
+        return {
+            "stage": self._stage,
+            "paused": self._paused,
+            "cancelled": self._cancelled,
+            "running_tasks": list(self._running),
+        }
+
+    @workflow.run
+    async def run(self, objective: ObjectiveInput) -> str:
+        await workflow.execute_activity(
+            "start_objective", objective, start_to_close_timeout=SHORT, retry_policy=DB_RETRY
+        )
+        self._stage = "planning"
+        try:
+            await workflow.execute_activity(
+                "plan_objective", objective, start_to_close_timeout=AGENT_RUN, retry_policy=AGENT_RETRY
+            )
+        except ActivityError as error:
+            return await self._finalize(objective, planning_error=str(error.cause or error))
+
+        self._stage = "executing"
+        while not self._cancelled:
+            await workflow.wait_condition(lambda: not self._paused or self._cancelled)
+            if self._cancelled:
+                break
+            snapshot: ReadySnapshot = await workflow.execute_activity(
+                "get_ready_tasks",
+                objective,
+                result_type=ReadySnapshot,
+                start_to_close_timeout=SHORT,
+                retry_policy=DB_RETRY,
+            )
+            for task_id in snapshot.ready_task_ids:
+                if task_id in self._running or len(self._running) >= snapshot.max_parallel:
+                    continue
+                ref = TaskRef(objective.organization_id, objective.objective_id, task_id)
+                self._running[task_id] = asyncio.create_task(self._run_task(ref, snapshot.max_review_rounds))
+            if not self._running:
+                break
+            self._wake = False
+            await workflow.wait_condition(
+                lambda: any(task.done() for task in self._running.values()) or self._cancelled or self._wake
+            )
+            for task_id, task in list(self._running.items()):
+                if task.done():
+                    del self._running[task_id]
+
+        if self._cancelled:
+            for task in self._running.values():
+                task.cancel()
+        return await self._finalize(objective, cancelled=self._cancelled)
+
+    async def _run_task(self, ref: TaskRef, max_review_rounds: int) -> None:
+        try:
+            for _ in range(max_review_rounds + 1):
+                result: ExecuteResult = await workflow.execute_activity(
+                    "execute_task",
+                    ref,
+                    result_type=ExecuteResult,
+                    start_to_close_timeout=AGENT_RUN,
+                    retry_policy=AGENT_RETRY,
+                )
+                if result.status == "failed":
+                    return
+                if result.approval_ids:
+                    await self._await_approvals(ref, result.approval_ids)
+                    if self._cancelled:
+                        return
+                    await workflow.execute_activity(
+                        "resolve_task_approvals", ref, start_to_close_timeout=SHORT, retry_policy=DB_RETRY
+                    )
+                if not result.requires_review:
+                    await workflow.execute_activity(
+                        "complete_task", ref, start_to_close_timeout=SHORT, retry_policy=DB_RETRY
+                    )
+                    return
+                review: ReviewResult = await workflow.execute_activity(
+                    "review_task",
+                    ref,
+                    result_type=ReviewResult,
+                    start_to_close_timeout=AGENT_RUN,
+                    retry_policy=AGENT_RETRY,
+                )
+                if review.verdict == "accept":
+                    return
+        except ActivityError as error:
+            await workflow.execute_activity(
+                "mark_task_failed",
+                TaskFailure(ref.organization_id, ref.objective_id, ref.task_id, str(error.cause or error)),
+                start_to_close_timeout=SHORT,
+                retry_policy=DB_RETRY,
+            )
+
+    async def _await_approvals(self, ref: TaskRef, approval_ids: list[str]) -> None:
+        await workflow.execute_activity(
+            "notify_approvals",
+            ApprovalCheck(ref.organization_id, approval_ids),
+            start_to_close_timeout=SHORT,
+            retry_policy=DB_RETRY,
+        )
+        while not self._cancelled and not all(item in self._decided for item in approval_ids):
+            try:
+                await workflow.wait_condition(
+                    lambda: self._cancelled or all(item in self._decided for item in approval_ids),
+                    timeout=APPROVAL_POLL,
+                )
+            except TimeoutError:
+                # Safety net: reconcile with the database in case a signal was never sent
+                decided: list[str] = await workflow.execute_activity(
+                    "decided_approvals",
+                    ApprovalCheck(ref.organization_id, approval_ids),
+                    result_type=list[str],
+                    start_to_close_timeout=SHORT,
+                    retry_policy=DB_RETRY,
+                )
+                self._decided.update(decided)
+
+    async def _finalize(
+        self, objective: ObjectiveInput, cancelled: bool = False, planning_error: str | None = None
+    ) -> str:
+        self._stage = "reporting"
+        final = FinalizeInput(objective.organization_id, objective.objective_id, cancelled, planning_error)
+        status: str = await workflow.execute_activity(
+            "finalize_objective", final, start_to_close_timeout=AGENT_RUN, retry_policy=DB_RETRY
+        )
+        await workflow.execute_activity(
+            "notify_objective_outcome", objective, start_to_close_timeout=SHORT, retry_policy=DB_RETRY
+        )
+        self._stage = "done"
+        return status
