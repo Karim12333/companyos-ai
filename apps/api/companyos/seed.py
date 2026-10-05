@@ -24,12 +24,36 @@ DEMO_OBJECTIVE = (
 )
 
 COMPANY_MEMORY = [
-    (MemoryCategory.IDENTITY, "Who we are", "ByteRoot Labs builds practical AI products for SMB teams in the GCC and Europe."),
-    (MemoryCategory.MISSION, "Mission", "Help small teams get enterprise-grade leverage from AI without enterprise complexity."),
-    (MemoryCategory.BRAND, "Voice", "Technical, concise and direct. No hype words. Lead with concrete outcomes."),
-    (MemoryCategory.POLICY, "External communication", "Nothing is published or sent externally without CEO approval."),
-    (MemoryCategory.PRODUCT, "Current products", "ByteRoot Assist (support copilot, beta) and ByteRoot Docs (internal search)."),
-    (MemoryCategory.BUSINESS_RULE, "Pricing guardrail", "Target SMB pricing between $29 and $99 per seat per month."),
+    (
+        MemoryCategory.IDENTITY,
+        "Who we are",
+        "ByteRoot Labs builds practical AI products for SMB teams in the GCC and Europe.",
+    ),
+    (
+        MemoryCategory.MISSION,
+        "Mission",
+        "Help small teams get enterprise-grade leverage from AI without enterprise complexity.",
+    ),
+    (
+        MemoryCategory.BRAND,
+        "Voice",
+        "Technical, concise and direct. No hype words. Lead with concrete outcomes.",
+    ),
+    (
+        MemoryCategory.POLICY,
+        "External communication",
+        "Nothing is published or sent externally without CEO approval.",
+    ),
+    (
+        MemoryCategory.PRODUCT,
+        "Current products",
+        "ByteRoot Assist (support copilot, beta) and ByteRoot Docs (internal search).",
+    ),
+    (
+        MemoryCategory.BUSINESS_RULE,
+        "Pricing guardrail",
+        "Target SMB pricing between $29 and $99 per seat per month.",
+    ),
 ]
 
 
@@ -52,7 +76,9 @@ async def seed(run_objective: bool) -> None:
             )
             for category, title, content in COMPANY_MEMORY:
                 session.add(
-                    CompanyMemory(organization_id=organization.id, category=category, title=title, content=content)
+                    CompanyMemory(
+                        organization_id=organization.id, category=category, title=title, content=content
+                    )
                 )
             session.add(
                 Project(
@@ -68,7 +94,9 @@ async def seed(run_objective: bool) -> None:
 
     if run_objective:
         async with tenant_scope(organization_id, user_id) as session:
-            project_id = await session.scalar(select(Project.id).where(Project.organization_id == organization_id))
+            project_id = await session.scalar(
+                select(Project.id).where(Project.organization_id == organization_id)
+            )
             objective = await create_objective(
                 session,
                 organization_id=organization_id,

@@ -50,6 +50,7 @@ class Settings(BaseSettings):
 
     max_upload_bytes: int = 10 * 1024 * 1024
     login_rate_limit_per_minute: int = 10
+    signup_rate_limit_per_minute: int = 5
 
     @property
     def is_production(self) -> bool:

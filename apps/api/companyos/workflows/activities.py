@@ -1006,8 +1006,8 @@ async def finalize_objective(data: FinalizeInput) -> str:
             generated_by_mock=ai.provider.is_mock,
         )
         artifact.review_status = ReviewStatus.NOT_REQUIRED
-        summary["report_artifact_id"] = str(artifact.id)
-        objective.executive_summary = summary
+        # New dict so SQLAlchemy detects the JSONB change
+        objective.executive_summary = {**summary, "report_artifact_id": str(artifact.id)}
         failed_like = status in (ObjectiveStatus.FAILED, ObjectiveStatus.COMPLETED_WITH_ISSUES)
         session.add(
             InboxItem(

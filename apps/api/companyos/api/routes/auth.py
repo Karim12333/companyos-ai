@@ -82,7 +82,7 @@ async def _me(session: AsyncSession, user: User, token: str) -> MeResponse:
 async def signup(
     body: SignupRequest, request: Request, response: Response, session: SystemSession
 ) -> MeResponse:
-    await rate_limit(f"signup:{_client_ip(request)}", 5)
+    await rate_limit(f"signup:{_client_ip(request)}", get_settings().signup_rate_limit_per_minute)
     email = body.email.lower()
     if await session.scalar(select(User.id).where(func.lower(User.email) == email)):
         raise HTTPException(status.HTTP_409_CONFLICT, "An account with this email already exists")
