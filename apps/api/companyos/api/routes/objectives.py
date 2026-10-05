@@ -30,11 +30,12 @@ from companyos.models import (
     TaskDependency,
     WorkflowRun,
 )
-from companyos.models.enums import OBJECTIVE_TERMINAL, ActorType, ObjectiveStatus
+from companyos.models.enums import OBJECTIVE_TERMINAL, ActorType, ObjectiveStatus, TaskStatus
 from companyos.rbac import Permission
 from companyos.services import objectives as objective_service
 
 router = APIRouter(prefix="/orgs/{org_id}/objectives", tags=["objectives"])
+RETRYABLE = (TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED)
 
 
 async def _load(session: AsyncSession, org: Org, objective_id: uuid.UUID) -> Objective:
@@ -264,23 +265,25 @@ async def retry_task(objective_id: uuid.UUID, task_id: uuid.UUID, org: Org, sess
     )
     if task is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found")
-    try:
-        reset = await objective_service.reset_task_for_retry(session, task)
-    except objective_service.ObjectiveStateError as error:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+    if task.status not in RETRYABLE:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Only failed, blocked or cancelled tasks can be retried"
+        )
     await record_activity(
         session,
         organization_id=org.organization_id,
         event_type="task.retry_requested",
-        summary=f"CEO retried {task.title} ({len(reset)} task(s) requeued)",
+        summary=f"CEO retried {task.title}",
         objective_id=objective.id,
         task_id=task.id,
         actor_type=ActorType.USER,
         actor_user_id=org.user.id,
     )
     await session.commit()
-    if not await objective_service.signal_workflow(objective.workflow_id, "wake"):
-        # Workflow already finished: resume the objective with a new durable run
+    # A live run (even one that is finishing) requeues the task itself: never two runs per objective
+    if not await objective_service.signal_workflow(objective.workflow_id, "retry_task", str(task.id)):
+        await objective_service.reset_task_for_retry(session, task)
+        await session.commit()
         try:
             await objective_service.start_workflow(org.organization_id, objective.id, resume=True)
         except objective_service.WorkflowUnavailable as error:

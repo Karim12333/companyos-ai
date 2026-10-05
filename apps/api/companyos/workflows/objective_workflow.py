@@ -46,6 +46,7 @@ class ObjectiveWorkflow:
         self._wake = False
         self._decided: set[str] = set()
         self._resolved_escalations: set[str] = set()
+        self._retry_requests: list[str] = []
         self._running: dict[str, asyncio.Task[None]] = {}
         self._stage = "starting"
 
@@ -74,6 +75,13 @@ class ObjectiveWorkflow:
     def wake(self) -> None:
         self._wake = True
 
+    @workflow.signal
+    def retry_task(self, task_id: str) -> None:
+        # Handled by this run even if it is already finalizing; requeued in the DB by an activity
+        if task_id not in self._retry_requests:
+            self._retry_requests.append(task_id)
+        self._wake = True
+
     @workflow.query
     def state(self) -> dict[str, Any]:
         return {
@@ -96,11 +104,26 @@ class ObjectiveWorkflow:
         except ActivityError as error:
             return await self._finalize(objective, planning_error=str(error.cause or error))
 
+        while True:
+            await self._execute(objective)
+            status = await self._finalize(objective, cancelled=self._cancelled)
+            if self._cancelled or not self._retry_requests:
+                return status
+            # A retry arrived while finishing: reopen the objective in this same run (never two runs at once)
+            await workflow.execute_activity(
+                "start_objective",
+                ObjectiveInput(objective.organization_id, objective.objective_id, resume=True),
+                start_to_close_timeout=SHORT,
+                retry_policy=DB_RETRY,
+            )
+
+    async def _execute(self, objective: ObjectiveInput) -> None:
         self._stage = "executing"
         while not self._cancelled:
             await workflow.wait_condition(lambda: not self._paused or self._cancelled)
             if self._cancelled:
                 break
+            await self._process_retries(objective)
             snapshot: ReadySnapshot = await workflow.execute_activity(
                 "get_ready_tasks",
                 objective,
@@ -114,6 +137,8 @@ class ObjectiveWorkflow:
                 ref = TaskRef(objective.organization_id, objective.objective_id, task_id)
                 self._running[task_id] = asyncio.create_task(self._run_task(ref, snapshot.max_review_rounds))
             if not self._running:
+                if self._retry_requests:
+                    continue
                 break
             self._wake = False
             await workflow.wait_condition(
@@ -122,11 +147,19 @@ class ObjectiveWorkflow:
             for task_id, task in list(self._running.items()):
                 if task.done():
                     del self._running[task_id]
-
         if self._cancelled:
             for task in self._running.values():
                 task.cancel()
-        return await self._finalize(objective, cancelled=self._cancelled)
+
+    async def _process_retries(self, objective: ObjectiveInput) -> None:
+        while self._retry_requests:
+            task_id = self._retry_requests.pop(0)
+            await workflow.execute_activity(
+                "requeue_task",
+                TaskRef(objective.organization_id, objective.objective_id, task_id),
+                start_to_close_timeout=SHORT,
+                retry_policy=DB_RETRY,
+            )
 
     async def _run_task(self, ref: TaskRef, max_review_rounds: int) -> None:
         """Explicit task state machine; every exit leaves the task in a visible state."""

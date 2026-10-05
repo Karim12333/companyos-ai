@@ -39,7 +39,15 @@ MOCK_PLAN_STEPS: list[tuple[str, str, str, list[str], str]] = [
         ["product_definition"],
         "strategy",
     ),
-    ("implementation_plan", "software_engineer", "Prepare the implementation plan", ["architecture"], "plan"),
+    (
+        "implementation_plan",
+        "fullstack_engineer",
+        "Prepare the implementation plan",
+        ["architecture"],
+        "plan",
+    ),
+    ("ai_pipeline", "ai_engineer", "Design the AI pipeline and evaluation", ["architecture"], "architecture"),
+    ("qa_strategy", "qa_engineer", "Define the QA and acceptance test plan", ["implementation_plan"], "plan"),
     ("launch_copy", "copywriter", "Write launch copy and social posts", ["positioning"], "copy"),
 ]
 
@@ -68,13 +76,15 @@ ROLE_SECTIONS: dict[str, list[str]] = {
         "Security considerations",
         "Delivery phases",
     ],
-    "software_engineer": [
-        "Milestones",
-        "Repository structure",
-        "Work breakdown",
-        "Testing strategy",
-        "Risks",
+    "fullstack_engineer": ["Milestones", "Repository structure", "Work breakdown", "Estimates", "Risks"],
+    "ai_engineer": [
+        "Model choices",
+        "Retrieval design",
+        "Evaluation plan",
+        "Cost and latency",
+        "Failure handling",
     ],
+    "qa_engineer": ["Test strategy", "Acceptance tests", "Regression scope", "AI output evaluation"],
     "marketing_strategist": [
         "Ideal customer profile",
         "Value proposition",

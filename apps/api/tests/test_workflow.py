@@ -37,7 +37,7 @@ async def test_objective_full_lifecycle(
 
     # The plan is persisted as a DAG before execution
     tasks = {task["plan_key"]: task for task in waiting["tasks"]}
-    assert len(tasks) == 6
+    assert len(tasks) == 8
     assert tasks["architecture"]["depends_on"] == [tasks["product_definition"]["id"]]
     # High-risk action is stopped: nothing was published yet
     assert not any(e["event_type"] == "integration.social_published" for e in waiting["activity"])
@@ -67,7 +67,7 @@ async def test_objective_full_lifecycle(
     assert any(e["event_type"] == "integration.social_published" for e in done["activity"])
     # Artifacts and executive report
     summary = done["objective"]["executive_summary"]
-    assert summary["tasks_completed"] == 6 and summary["approvals_approved"] == 1
+    assert summary["tasks_completed"] == 8 and summary["approvals_approved"] == 1
     assert any(a["kind"] == "executive_report" for a in done["artifacts"])
     report_id = summary["report_artifact_id"]
     content = await tenant.client.get(tenant.url(f"/artifacts/{report_id}/content"))
@@ -79,7 +79,7 @@ async def test_objective_full_lifecycle(
     assert any(n.to == tenant.email and "Objective completed" in n.subject for n in mailbox.sent)
     assert any(n.subject.startswith("CompanyOS — Approval required") for n in mailbox.sent)
     hq = (await tenant.client.get(tenant.url("/headquarters"))).json()
-    assert hq["health"]["tasks_completed_today"] >= 6
+    assert hq["health"]["tasks_completed_today"] >= 8
 
 
 async def test_rejected_action_is_not_executed(temporal: Client, tenant: Tenant) -> None:
@@ -118,7 +118,7 @@ async def test_failures_are_reported_and_retryable(temporal: Client, tenant: Ten
     assert tasks["product_definition"]["error_category"] == "provider"
     assert tasks["architecture"]["status"] == "BLOCKED"
     summary = done["objective"]["executive_summary"]
-    assert summary["tasks_failed"] == 5
+    assert summary["tasks_failed"] == 7
     assert any(failure["task"] == tasks["product_definition"]["title"] for failure in summary["failures"])
     inbox = (await tenant.client.get(tenant.url("/inbox"), params={"category": "FAILED"})).json()
     assert inbox["items"]

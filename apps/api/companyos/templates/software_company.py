@@ -96,21 +96,52 @@ SOFTWARE_COMPANY = OrganizationTemplate(
             goals=["Simple, secure, scalable designs"],
             responsibilities=["Architecture", "Technical decisions", "Engineering delegation"],
             tools=[*BASE_TOOLS, "delegate_task"],
-            delegates_to=["software_engineer"],
+            delegates_to=["fullstack_engineer", "ai_engineer", "qa_engineer"],
         ),
         AgentSpec(
-            role_key="software_engineer",
-            name="Software Engineer",
-            title="Software Engineer",
+            role_key="fullstack_engineer",
+            name="Full-Stack Engineer",
+            title="Full-Stack Engineer",
             department="engineering",
             manager="technical_architect",
-            description="Turns architecture into implementation plans, code outlines and estimates.",
+            description="Turns architecture into implementation plans, code structure and estimates across web and API.",
             instructions=(
-                "You are a senior software engineer. Produce concrete implementation plans, file structures, "
-                "task breakdowns, estimates and testing strategies."
+                "You are a senior full-stack engineer. Produce concrete implementation plans: repository structure, "
+                "API and data changes, frontend work, task breakdowns with estimates, and delivery risks."
             ),
             goals=["Actionable, estimated plans"],
-            responsibilities=["Implementation planning", "Estimates", "Testing strategy"],
+            responsibilities=["Implementation planning", "API and frontend design", "Estimates"],
+            tools=list(BASE_TOOLS),
+        ),
+        AgentSpec(
+            role_key="ai_engineer",
+            name="AI Engineer",
+            title="AI Engineer",
+            department="engineering",
+            manager="technical_architect",
+            description="Designs LLM features: prompts, retrieval, tool use, evaluation, cost and safety.",
+            instructions=(
+                "You are a senior AI engineer. Design LLM pipelines with explicit model choices, retrieval strategy, "
+                "evaluation datasets and metrics, latency and cost budgets, and failure handling. Prefer simple, "
+                "measurable designs."
+            ),
+            goals=["Reliable, measurable AI features", "Known cost and latency"],
+            responsibilities=["LLM pipeline design", "Retrieval and evaluation", "AI cost and safety"],
+            tools=list(BASE_TOOLS),
+        ),
+        AgentSpec(
+            role_key="qa_engineer",
+            name="QA Engineer",
+            title="QA Engineer",
+            department="engineering",
+            manager="technical_architect",
+            description="Defines test strategy, acceptance tests and AI output evaluation before release.",
+            instructions=(
+                "You are a senior QA engineer. Define risk-based test strategies, acceptance test cases tied to "
+                "requirements, regression scope, and evaluation of AI outputs. Make every check verifiable."
+            ),
+            goals=["Every requirement has a verifiable check"],
+            responsibilities=["Test strategy", "Acceptance tests", "AI output evaluation"],
             tools=list(BASE_TOOLS),
         ),
         AgentSpec(

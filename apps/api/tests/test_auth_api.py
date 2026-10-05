@@ -1,7 +1,13 @@
+import uuid
 from typing import Any
 
 import httpx
+from sqlalchemy import select
 
+from companyos.db import tenant_scope
+from companyos.models import Agent, AgentRelationship
+from companyos.services.organizations import instantiate_template
+from companyos.templates.software_company import SOFTWARE_COMPANY
 from tests.conftest import Tenant
 
 
@@ -73,3 +79,29 @@ async def test_second_organization_and_template_listing(tenant: Tenant) -> None:
     assert created.status_code == 201
     me = (await tenant.client.get("/api/v1/auth/me")).json()
     assert len(me["organizations"]) == 2
+
+
+async def test_template_sync_is_idempotent_and_additive(tenant: Tenant) -> None:
+    organization_id = uuid.UUID(tenant.org_id)
+    async with tenant_scope(organization_id) as session:
+        agents = {agent.role_key: agent for agent in (await session.scalars(select(Agent))).all()}
+        assert {"fullstack_engineer", "ai_engineer", "qa_engineer"} <= set(agents)
+        architect = agents["technical_architect"]
+        architect.system_instructions = "Customized by the CEO"
+        await session.delete(agents["qa_engineer"])
+    async with tenant_scope(organization_id) as session:
+        await instantiate_template(session, organization_id, SOFTWARE_COMPANY)
+        await instantiate_template(session, organization_id, SOFTWARE_COMPANY)
+    async with tenant_scope(organization_id) as session:
+        agents = {agent.role_key: agent for agent in (await session.scalars(select(Agent))).all()}
+        assert len(agents) == len(SOFTWARE_COMPANY.agents)
+        assert agents["technical_architect"].system_instructions == "Customized by the CEO"
+        delegates = set(
+            await session.scalars(
+                select(AgentRelationship.related_agent_id).where(
+                    AgentRelationship.agent_id == agents["technical_architect"].id
+                )
+            )
+        )
+        assert agents["qa_engineer"].id in delegates
+        assert agents["qa_engineer"].manager_agent_id == agents["technical_architect"].id

@@ -1,4 +1,4 @@
-"""Seeds the ByteRoot Labs Demo organization. Usage: python -m companyos.seed [--run-objective]"""
+"""Seeds the demo organization. Usage: python -m companyos.seed [--run-objective] [--sync-templates]"""
 
 import asyncio
 import sys
@@ -8,11 +8,12 @@ from sqlalchemy import select
 from companyos.config import get_settings
 from companyos.db import dispose_engine, system_scope, tenant_scope
 from companyos.events import close_redis
-from companyos.models import CompanyMemory, Organization, Project, User
+from companyos.models import Agent, CompanyMemory, Organization, Project, User
 from companyos.models.enums import MemoryCategory, Priority
 from companyos.security import hash_password
 from companyos.services.objectives import WorkflowUnavailable, create_objective, start_workflow
-from companyos.services.organizations import create_organization
+from companyos.services.organizations import create_organization, instantiate_template
+from companyos.templates import TEMPLATES
 
 DEMO_EMAIL = "ceo@byteroot.demo"
 DEMO_PASSWORD = "CompanyOS-demo-2026"  # noqa: S105 - local demo credential, documented in README
@@ -115,8 +116,26 @@ async def seed(run_objective: bool) -> None:
     print(f"Open {get_settings().web_base_url}")
 
 
+async def sync_templates() -> None:
+    # Brings every organization up to its template: adds missing agents, tools and delegations only
+    async with system_scope() as session:
+        organizations = (await session.scalars(select(Organization))).all()
+        for organization in organizations:
+            template = TEMPLATES.get(organization.template_key or "")
+            if template is None:
+                continue
+            before = len(
+                (await session.scalars(select(Agent).where(Agent.organization_id == organization.id))).all()
+            )
+            agents = await instantiate_template(session, organization.id, template)
+            print(f"{organization.name}: {len(agents) - before} agent(s) added")
+
+
 async def main() -> None:
     try:
+        if "--sync-templates" in sys.argv:
+            await sync_templates()
+            return
         await seed("--run-objective" in sys.argv)
     finally:
         await close_redis()

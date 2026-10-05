@@ -212,6 +212,8 @@ async def finalize_objective(data: FinalizeInput) -> str:
             .where(WorkflowRun.objective_id == objective_id, WorkflowRun.finished_at.is_(None))
             .values(status=status.value.lower(), finished_at=now())
         )
+        # The outcome email is written to the outbox in the same transaction as the report
+        await notify_objective_finished(session, organization_id, objective_id)
         # Only this objective's agents, and only if they are not busy on another objective
         for agent_id in {task.assigned_agent_id for task in tasks if task.assigned_agent_id}:
             await set_agent_idle_if_free(session, agent_id)

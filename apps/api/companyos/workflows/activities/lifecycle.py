@@ -21,6 +21,7 @@ from companyos.models.enums import (
     TaskStatus,
 )
 from companyos.services.objective_status import refresh_objective_status
+from companyos.services.objectives import ObjectiveStateError, reset_task_for_retry
 from companyos.workflows.activities.shared import (
     NON_RETRYABLE,
     ids,
@@ -29,6 +30,7 @@ from companyos.workflows.activities.shared import (
 from companyos.workflows.types import (
     ObjectiveInput,
     ReadySnapshot,
+    TaskRef,
 )
 
 
@@ -139,3 +141,26 @@ async def get_ready_tasks(data: ObjectiveInput) -> ReadySnapshot:
             max_parallel=settings.max_parallel_tasks if settings else 4,
             max_review_rounds=settings.max_review_revisions if settings else 2,
         )
+
+
+@activity.defn(name="requeue_task")
+async def requeue_task(ref: TaskRef) -> bool:
+    """Requeues a failed task and everything blocked behind it; no-op if it is no longer retryable."""
+    organization_id, objective_id, task_id = ids(ref.organization_id, ref.objective_id, ref.task_id)
+    async with tenant_scope(organization_id) as session:
+        task = await session.get(Task, task_id)
+        if task is None or task.objective_id != objective_id:
+            return False
+        try:
+            reset = await reset_task_for_retry(session, task)
+        except ObjectiveStateError:
+            return False
+        await record_activity(
+            session,
+            organization_id=organization_id,
+            event_type="task.requeued",
+            summary=f"Requeued {task.title} ({len(reset)} task(s)) for retry",
+            objective_id=objective_id,
+            task_id=task.id,
+        )
+        return True

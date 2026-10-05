@@ -42,7 +42,7 @@ export default function SignupPage() {
   return (
     <AuthLayout
       title="Create your organization"
-      subtitle="You'll start with a Software / AI Company: 5 departments and 9 specialist agents."
+      subtitle="You'll start with a Software / AI Company: 5 departments and 11 specialist agents."
     >
       <form onSubmit={submit} className="space-y-4">
         <Field label="Your name" htmlFor="full_name">

@@ -84,21 +84,43 @@ async def create_organization(
 async def instantiate_template(
     session: AsyncSession, organization_id: uuid.UUID, template: OrganizationTemplate
 ) -> dict[str, Agent]:
-    departments: dict[str, Department] = {}
+    """Idempotent: creates what is missing and only adds tools/delegations, so it also upgrades orgs."""
+    departments = {
+        department.slug: department
+        for department in (
+            await session.scalars(select(Department).where(Department.organization_id == organization_id))
+        ).all()
+    }
     for spec in template.departments:
-        department = Department(
-            organization_id=organization_id,
-            name=spec.name,
-            slug=spec.slug,
-            description=spec.description,
-            sort_order=spec.sort_order,
-        )
-        session.add(department)
-        departments[spec.slug] = department
+        if spec.slug not in departments:
+            department = Department(
+                organization_id=organization_id,
+                name=spec.name,
+                slug=spec.slug,
+                description=spec.description,
+                sort_order=spec.sort_order,
+            )
+            session.add(department)
+            departments[spec.slug] = department
     await session.flush()
 
-    agents: dict[str, Agent] = {}
+    agents = {
+        agent.role_key: agent
+        for agent in (
+            await session.scalars(select(Agent).where(Agent.organization_id == organization_id))
+        ).all()
+    }
+    created: set[str] = set()
     for agent_spec in template.agents:
+        existing = agents.get(agent_spec.role_key)
+        if existing is not None:
+            if existing.template_key == template.key:
+                # Template-managed agents gain new template tools; customizations are never removed
+                owned = {tool.tool_key for tool in existing.tools}
+                for tool in agent_spec.tools:
+                    if tool not in owned:
+                        existing.tools.append(AgentTool(organization_id=organization_id, tool_key=tool))
+            continue
         agent = Agent(
             organization_id=organization_id,
             department_id=departments[agent_spec.department].id,
@@ -116,22 +138,38 @@ async def instantiate_template(
         )
         session.add(agent)
         agents[agent_spec.role_key] = agent
+        created.add(agent_spec.role_key)
     await session.flush()
 
-    for agent_spec in template.agents:
-        agent = agents[agent_spec.role_key]
-        if agent_spec.manager:
-            agent.manager_agent_id = agents[agent_spec.manager].id
-        if agent_spec.is_department_manager:
-            departments[agent_spec.department].manager_agent_id = agent.id
-        for delegate in agent_spec.delegates_to:
-            session.add(
-                AgentRelationship(
-                    organization_id=organization_id,
-                    agent_id=agent.id,
-                    related_agent_id=agents[delegate].id,
-                    kind="can_delegate_to",
+    relations: set[tuple[uuid.UUID, uuid.UUID]] = {
+        (row[0], row[1])
+        for row in (
+            await session.execute(
+                select(AgentRelationship.agent_id, AgentRelationship.related_agent_id).where(
+                    AgentRelationship.organization_id == organization_id
                 )
             )
+        ).all()
+    }
+    for agent_spec in template.agents:
+        agent = agents[agent_spec.role_key]
+        if agent_spec.role_key in created:
+            if agent_spec.manager and agent_spec.manager in agents:
+                agent.manager_agent_id = agents[agent_spec.manager].id
+            department = departments[agent_spec.department]
+            if agent_spec.is_department_manager and department.manager_agent_id is None:
+                department.manager_agent_id = agent.id
+        for delegate in agent_spec.delegates_to:
+            target = agents.get(delegate)
+            if target is not None and (agent.id, target.id) not in relations:
+                session.add(
+                    AgentRelationship(
+                        organization_id=organization_id,
+                        agent_id=agent.id,
+                        related_agent_id=target.id,
+                        kind="can_delegate_to",
+                    )
+                )
+                relations.add((agent.id, target.id))
     await session.flush()
     return agents
