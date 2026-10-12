@@ -7,6 +7,7 @@ import { useState } from "react";
 
 import { ActivityFeed } from "@/components/activity-feed";
 import { ApprovalActions } from "@/components/approval-actions";
+import { CodeChanges, type CodeChange } from "@/components/code-changes";
 import { ExecutiveReport } from "@/components/executive-report";
 import { TaskGraph } from "@/components/task-graph";
 import { Badge, RiskBadge, StatusBadge } from "@/components/ui/badge";
@@ -27,6 +28,7 @@ interface ObjectiveDetailData {
   approvals: Approval[];
   artifacts: Artifact[];
   activity: ActivityEvent[];
+  code_changes: CodeChange[];
   workflow_runs: { workflow_id: string; status: string; started_at: string | null; finished_at: string | null }[];
 }
 
@@ -168,6 +170,7 @@ export function ObjectiveDetail() {
               <Card className="min-w-0 p-5">
                 <TaskGraph tasks={tasks} agents={agents.byId} selectedId={selected?.id} onSelect={(task) => setSelectedId(task.id)} />
               </Card>
+              <CodeChanges changes={data.code_changes ?? []} />
               <TaskPanel task={selected} agents={agents.byId} objectiveId={objective.id} artifacts={data.artifacts} />
             </div>
           )}

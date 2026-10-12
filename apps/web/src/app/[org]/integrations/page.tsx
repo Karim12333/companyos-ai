@@ -3,6 +3,7 @@
 import { KeyRound, Lock } from "lucide-react";
 import { useState, type FormEvent } from "react";
 
+import { GitHubCard } from "@/components/github-card";
 import { Badge, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, PageHeader } from "@/components/ui/card";
@@ -13,7 +14,7 @@ import { useOrgMutation } from "@/lib/hooks";
 import { useOrg, useOrgQuery } from "@/lib/session";
 import type { Integration } from "@/lib/types";
 
-const PLANNED = ["GitHub", "Gmail", "Google Drive", "Google Calendar", "Slack", "Microsoft Teams", "Metricool", "CRMs"];
+const PLANNED = ["Gmail", "Google Drive", "Google Calendar", "Slack", "Microsoft Teams", "Metricool", "CRMs"];
 
 export default function IntegrationsPage() {
   const { data, error, isPending } = useOrgQuery<Integration[]>(["integrations"], "/integrations");
@@ -28,6 +29,7 @@ export default function IntegrationsPage() {
         description="Connections your agents may use. Secrets are encrypted at rest, never shown again after saving, and never sent to the AI model."
       />
       <AIProviderCard integration={byKey.get("ai_provider")} />
+      <GitHubCard integration={byKey.get("github")} />
       <WebSearchCard integration={byKey.get("web_search")} />
       {byKey.get("social_sandbox") && (
         <Card>

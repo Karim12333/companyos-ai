@@ -1,7 +1,4 @@
 import uuid
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from typing import Any
 
 import httpx
 from pydantic import BaseModel, Field
@@ -11,62 +8,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from companyos.events import record_activity
 from companyos.models import Agent, AgentMessage, AgentRelationship, Artifact, Evidence, Integration, Task
 from companyos.models.enums import ActorType, EscalationKind, MessageKind, RiskLevel, TaskStatus
-from companyos.providers.llm import LLMProvider
 from companyos.providers.web_search import WebSearchUnavailable, tavily_search
 from companyos.services import artifacts as artifact_service
 from companyos.services import knowledge as knowledge_service
 from companyos.services.escalations import agent_options, create_escalation
 from companyos.services.integrations import get_integration_secret
+from companyos.tools.base import ToolContext, ToolDefinition, ToolExecutionError, ToolResult
+from companyos.tools.github_tools import GITHUB_TOOLS
 
 MAX_DELEGATIONS_PER_TASK = 3
 MAX_DELEGATION_DEPTH = 2
 MAX_TOOL_OUTPUT_CHARS = 12_000
-
-
-@dataclass
-class ToolContext:
-    organization_id: uuid.UUID
-    agent_id: uuid.UUID
-    agent_role_key: str
-    objective_id: uuid.UUID | None
-    task_id: uuid.UUID | None
-    task_run_id: uuid.UUID | None
-    llm: LLMProvider
-    embedding_model: str
-    max_messages_per_task: int = 6
-    extra: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class ToolResult:
-    content: str
-    data: dict[str, Any] = field(default_factory=dict)
-    untrusted: bool = False
-
-
-class ToolExecutionError(Exception):
-    """Expected tool failure; message is safe to show to the agent."""
-
-
-Handler = Callable[[ToolContext, AsyncSession, Any], Awaitable[ToolResult]]
-
-
-@dataclass(frozen=True)
-class ToolDefinition:
-    key: str
-    description: str
-    risk_level: RiskLevel
-    args_model: type[BaseModel]
-    handler: Handler
-    # External tools change the outside world: executed once, tracked, never blindly repeated
-    external: bool = False
-    # True only when the provider deduplicates by our idempotency key, making re-sends safe
-    provider_idempotent: bool = False
-
-    def json_schema(self) -> dict[str, Any]:
-        schema = self.args_model.model_json_schema()
-        schema.pop("title", None)
-        return schema
 
 
 # ---------- argument models ----------
@@ -548,3 +500,6 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
 }
 
 __all__ = ["TOOL_REGISTRY", "RiskLevel", "ToolContext", "ToolDefinition", "ToolExecutionError", "ToolResult"]
+
+
+TOOL_REGISTRY.update({tool.key: tool for tool in GITHUB_TOOLS})

@@ -7,6 +7,22 @@ BASE_TOOLS = [
     "send_message",
     "escalate_to_ceo",
 ]
+GITHUB_READ = [
+    "github_get_repo_info",
+    "github_list_files",
+    "github_read_file",
+    "github_search_code",
+    "github_get_branch",
+    "github_get_pull_request",
+    "github_run_repository_checks",
+]
+# Only explicitly authorized engineering agents may change code
+GITHUB_WRITE = [
+    "github_create_branch",
+    "github_write_file",
+    "github_commit_changes",
+    "github_create_pull_request",
+]
 
 SOFTWARE_COMPANY = OrganizationTemplate(
     key="software_ai_company",
@@ -95,7 +111,7 @@ SOFTWARE_COMPANY = OrganizationTemplate(
             ),
             goals=["Simple, secure, scalable designs"],
             responsibilities=["Architecture", "Technical decisions", "Engineering delegation"],
-            tools=[*BASE_TOOLS, "delegate_task"],
+            tools=[*BASE_TOOLS, "delegate_task", *GITHUB_READ],
             delegates_to=["fullstack_engineer", "ai_engineer", "qa_engineer"],
         ),
         AgentSpec(
@@ -106,12 +122,15 @@ SOFTWARE_COMPANY = OrganizationTemplate(
             manager="technical_architect",
             description="Turns architecture into implementation plans, code structure and estimates across web and API.",
             instructions=(
-                "You are a senior full-stack engineer. Produce concrete implementation plans: repository structure, "
-                "API and data changes, frontend work, task breakdowns with estimates, and delivery risks."
+                "You are a senior full-stack engineer. For work on a connected repository: inspect it, create a new "
+                "branch, read the relevant files, commit focused changes to that branch, check CI with "
+                "github_run_repository_checks, save an implementation summary artifact (branch, commits, changed "
+                "files, check results), then request a pull request; opening it needs CEO approval. Never write to "
+                "main or master. Without a repository, produce concrete implementation plans and estimates."
             ),
             goals=["Actionable, estimated plans"],
             responsibilities=["Implementation planning", "API and frontend design", "Estimates"],
-            tools=list(BASE_TOOLS),
+            tools=[*BASE_TOOLS, *GITHUB_READ, *GITHUB_WRITE],
         ),
         AgentSpec(
             role_key="ai_engineer",
@@ -127,7 +146,7 @@ SOFTWARE_COMPANY = OrganizationTemplate(
             ),
             goals=["Reliable, measurable AI features", "Known cost and latency"],
             responsibilities=["LLM pipeline design", "Retrieval and evaluation", "AI cost and safety"],
-            tools=list(BASE_TOOLS),
+            tools=[*BASE_TOOLS, *GITHUB_READ],
         ),
         AgentSpec(
             role_key="qa_engineer",
@@ -142,7 +161,7 @@ SOFTWARE_COMPANY = OrganizationTemplate(
             ),
             goals=["Every requirement has a verifiable check"],
             responsibilities=["Test strategy", "Acceptance tests", "AI output evaluation"],
-            tools=list(BASE_TOOLS),
+            tools=[*BASE_TOOLS, *GITHUB_READ],
         ),
         AgentSpec(
             role_key="marketing_strategist",
@@ -196,7 +215,7 @@ SOFTWARE_COMPANY = OrganizationTemplate(
             ),
             goals=["Only accepted work reaches the CEO"],
             responsibilities=["Quality review", "Revision requests"],
-            tools=["search_company_knowledge", "read_artifact"],
+            tools=["search_company_knowledge", "read_artifact", *GITHUB_READ],
         ),
         AgentSpec(
             role_key="executive_reporter",

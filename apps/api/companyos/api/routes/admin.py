@@ -1,3 +1,4 @@
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -11,6 +12,7 @@ from companyos.api.schemas import (
     AIProviderUpdate,
     ApprovalPolicyOut,
     ApprovalPolicyUpdate,
+    GitHubUpdate,
     IntegrationOut,
     MemberAdd,
     MemberOut,
@@ -33,6 +35,7 @@ from companyos.models import (
 )
 from companyos.models.enums import ActorType, IntegrationStatus, MemberRole, TaskStatus
 from companyos.observability import logger
+from companyos.providers.github import GitHubClient, GitHubError
 from companyos.providers.llm import LLMError, LLMMessage, OpenAICompatibleProvider
 from companyos.rbac import Permission
 from companyos.services.integrations import (
@@ -42,6 +45,7 @@ from companyos.services.integrations import (
     secret_last4,
     store_integration_secret,
 )
+from companyos.tools.github_tools import REPO_PATTERN
 
 router = APIRouter(prefix="/orgs/{org_id}", tags=["administration"])
 
@@ -223,6 +227,64 @@ async def update_web_search(body: SecretUpdate, org: Org, session: OrgSession) -
     integration.enabled = True
     await store_integration_secret(session, integration, body.api_key.strip(), org.user.id)
     await _audit(session, org, "integration.web_search.update", "integration", integration.id)
+    return await _integration_out(session, integration)
+
+
+@router.put("/integrations/github", response_model=IntegrationOut)
+async def update_github(body: GitHubUpdate, org: Org, session: OrgSession) -> IntegrationOut:
+    org.require(Permission.MANAGE_INTEGRATIONS)
+    repos = sorted({item.strip() for item in body.allowed_repos if item.strip()})
+    invalid = [item for item in repos if not re.fullmatch(REPO_PATTERN, item)]
+    if invalid:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid repository names: {', '.join(invalid)}")
+    integration = await _integration(session, org, "github")
+    integration.name = "GitHub"
+    integration.enabled = body.enabled
+    integration.scopes = ["contents", "pull_requests"] + (["write"] if body.write_enabled else [])
+    integration.config = {
+        "allowed_repos": repos,
+        "default_branch": body.default_branch,
+        "write_enabled": body.write_enabled,
+    }
+    if body.token:
+        await store_integration_secret(session, integration, body.token.strip(), org.user.id)
+    elif not await secret_last4(session, integration):
+        integration.status = IntegrationStatus.NOT_CONFIGURED
+    await _audit(
+        session,
+        org,
+        "integration.github.update",
+        "integration",
+        integration.id,
+        {"token_changed": bool(body.token), **integration.config},
+    )
+    await session.flush()
+    return await _integration_out(session, integration)
+
+
+@router.post("/integrations/github/test", response_model=IntegrationOut)
+async def test_github(org: Org, session: OrgSession) -> IntegrationOut:
+    org.require(Permission.MANAGE_INTEGRATIONS)
+    integration = await _integration(session, org, "github")
+    token = await get_integration_secret(session, integration)
+    if not token:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No GitHub token configured")
+    client = GitHubClient(token)
+    try:
+        user = await client.user()
+        reachable = []
+        for repo in (integration.config or {}).get("allowed_repos", []):
+            await client.repo(repo)
+            reachable.append(repo)
+        integration.status = IntegrationStatus.CONNECTED
+        integration.health_message = (
+            f"Connected as {user.get('login')}; repositories reachable: {', '.join(reachable) or 'none'}"
+        )
+    except GitHubError as error:
+        integration.status = IntegrationStatus.ERROR
+        integration.health_message = str(error)
+    integration.last_checked_at = datetime.now(UTC)
+    await session.flush()
     return await _integration_out(session, integration)
 
 

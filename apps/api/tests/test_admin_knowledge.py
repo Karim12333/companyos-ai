@@ -52,9 +52,13 @@ async def test_settings_update_and_validation(tenant: Tenant) -> None:
 
 async def test_approval_policies_seeded_for_controlled_actions(tenant: Tenant) -> None:
     policies = (await tenant.client.get(tenant.url("/approval-policies"))).json()
-    assert [policy["action_key"] for policy in policies] == ["schedule_social_post"]
+    by_key = {policy["action_key"]: policy for policy in policies}
+    assert by_key["schedule_social_post"]["requires_approval"] is True
+    # Work-branch GitHub writes are controlled but allowed by default; PRs/merges are Level 3
+    assert by_key["github_commit_changes"]["requires_approval"] is False
+    assert "github_merge_pull_request" not in by_key
     updated = await tenant.client.put(
-        tenant.url(f"/approval-policies/{policies[0]['id']}"),
+        tenant.url(f"/approval-policies/{by_key['schedule_social_post']['id']}"),
         json={"requires_approval": False},
         headers=tenant.headers,
     )

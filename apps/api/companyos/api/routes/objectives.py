@@ -195,6 +195,18 @@ async def get_objective(objective_id: uuid.UUID, org: Org, session: OrgSession) 
             }
             for item in evidence
         ],
+        "code_changes": [
+            {
+                "event": item.event_type.removeprefix("github."),
+                "summary": item.summary,
+                "task_id": item.task_id,
+                "agent_id": item.agent_id,
+                "created_at": item.created_at,
+                **item.data,
+            }
+            for item in reversed(activity)
+            if item.event_type.startswith("github.")
+        ],
         "escalations": [EscalationOut.model_validate(item).model_dump(mode="json") for item in escalations],
         "activity": [ActivityOut.model_validate(item).model_dump(mode="json") for item in activity],
         "workflow_runs": [

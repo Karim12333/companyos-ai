@@ -69,7 +69,7 @@ async def create_organization(
                 ApprovalPolicy(
                     organization_id=organization.id,
                     action_key=action_key,
-                    requires_approval=True,
+                    requires_approval=tool.default_requires_approval,
                     description=tool.description,
                 )
             )

@@ -496,6 +496,14 @@ class AIProviderUpdate(BaseModel):
     enabled: bool = True
 
 
+class GitHubUpdate(BaseModel):
+    token: str | None = Field(default=None, min_length=20, max_length=500)
+    allowed_repos: list[str] = Field(default_factory=list, max_length=20)
+    default_branch: str = Field(default="main", pattern=r"^[A-Za-z0-9._/-]{1,100}$")
+    write_enabled: bool = False
+    enabled: bool = True
+
+
 class SecretUpdate(BaseModel):
     api_key: str = Field(min_length=8, max_length=500)
 

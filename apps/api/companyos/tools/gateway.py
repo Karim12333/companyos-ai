@@ -48,7 +48,10 @@ async def _policy_input(
         agent_active=agent.is_active,
         agent_tool_keys=frozenset(t.tool_key for t in agent.tools if t.enabled),
         agent_permissions={p.action_key: p.effect for p in agent.permissions},
-        org_requires_approval={p.action_key: p.requires_approval for p in org_policies},
+        org_requires_approval={
+            **{key: item.default_requires_approval for key, item in TOOL_REGISTRY.items()},
+            **{p.action_key: p.requires_approval for p in org_policies},
+        },
         objective_external_actions=(objective.approval_policy or {}).get(
             "external_actions", "require_approval"
         )
